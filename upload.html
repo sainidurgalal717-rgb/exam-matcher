@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Upload &amp; Match — I LOVE EXAM MATCHER</title>
+<meta name="description" content="Question Paper और Official Answer Key (PDF / Image) upload करें — automatic content-based matching के साथ सही result पाएँ, भले ही question numbers अलग हों।">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&family=Caveat:wght@600;700&family=Noto+Sans+Devanagari:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/css/style.css?v=26">
+<link rel="stylesheet" href="assets/css/pages.css?v=26">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="header-inner">
+    <a class="brand" href="index.html">
+      <span class="heart">❤️</span>
+      <span class="brand-text">
+        <span class="brand-name"><span class="love">I</span> <span class="love">LOVE</span> <span class="exam">EXAM</span> <span class="matcher">MATCHER</span></span>
+        <span class="brand-tag">Match Your Questions - Get Your Result</span>
+      </span>
+    </a>
+    <button class="nav-toggle" aria-label="Menu">☰</button>
+    <nav class="nav">
+      <a href="index.html"><span class="ic">🏠</span> Home</a>
+      <a href="how-it-works.html"><span class="ic">⏱️</span> How It Works</a>
+      <a href="features.html"><span class="ic">🔲</span> Features</a>
+      <a href="omr-set.html"><span class="ic">📋</span> OMR Set</a>
+      <a href="about.html"><span class="ic">ℹ️</span> About</a>
+      <a class="auth-btn" href="login.html"><span>👤</span> Login / Sign Up</a>
+    </nav>
+  </div>
+</header>
+
+<main class="page">
+
+  <div class="page-head">
+    <div class="head-ic" style="color:#1668f5"><span class="ic-up"></span></div>
+    <div>
+      <h1>Upload Your Files</h1>
+      <p class="sub">Question Paper और Official Answer Key upload करें — numbers अलग होने पर भी matching सही होगी।</p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row between wrap mb16">
+      <div class="tabs" id="modeTabs">
+        <button data-mode="map" class="on">दो Paper — Set / Series Mapping</button>
+        <button data-mode="mapkey">मेरा Paper + दूसरी Series + Key</button>
+        <button data-mode="omr">OMR Set (Student + Key)</button>
+      </div>
+      <button class="btn ghost sm" id="toggleText">✍️ Text paste करें</button>
+    </div>
+
+    <div id="fileMode">
+      <div class="grid g2" id="dropGrid">
+        <div>
+          <div class="drop" id="dropQ" tabindex="0">
+            <div class="dic"><span class="ic-up"></span></div>
+            <div class="dt" id="dropQT">Click to upload or drag &amp; drop</div>
+            <div class="ds" id="dropQS">मेरा Question Paper (Series A / B / C…)</div>
+            <div class="file" id="fileQ"></div>
+            <div class="dz-btns">
+              <button type="button" class="btn ghost sm" id="mkQ"><span>🧹</span> यहीं साफ़ PDF बनाएँ</button>
+              <button type="button" class="btn sm hide" id="useQ"><span>➡️</span> वह PDF यहाँ लगाएँ</button>
+              <a class="btn ghost sm hide" id="dlQ" href="#" download="clean.pdf"><span>⬇️</span> PDF download</a>
+            </div>
+          </div>
+          <input type="file" id="inputQ" accept=".pdf,image/*,.txt" hidden>
+        </div>
+        <div>
+          <div class="drop" id="dropK" tabindex="0">
+            <div class="dic"><span class="ic-up"></span></div>
+            <div class="dt" id="dropKT">Click to upload or drag &amp; drop</div>
+            <div class="ds" id="dropKS">सरकारी Question Paper (दूसरी Series)</div>
+            <div class="file" id="fileK"></div>
+            <div class="dz-btns">
+              <button type="button" class="btn ghost sm" id="mkK"><span>🧹</span> यहीं साफ़ PDF बनाएँ</button>
+              <button type="button" class="btn sm hide" id="useK"><span>➡️</span> वह PDF यहाँ लगाएँ</button>
+              <a class="btn ghost sm hide" id="dlK" href="#" download="clean.pdf"><span>⬇️</span> PDF download</a>
+            </div>
+          </div>
+          <input type="file" id="inputK" accept=".pdf,image/*,.txt" hidden>
+        </div>
+        <div>
+          <div class="drop hide" id="dropK2" tabindex="0">
+            <div class="dic"><span class="ic-up"></span></div>
+            <div class="dt" id="dropK2T">Click to upload or drag &amp; drop</div>
+            <div class="ds" id="dropK2S">Official Answer Key (1 - A, 2 - C…)</div>
+            <div class="file" id="fileK2"></div>
+            <div class="dz-btns">
+              <button type="button" class="btn ghost sm" id="mkK2"><span>🧹</span> यहीं साफ़ PDF बनाएँ</button>
+              <button type="button" class="btn sm hide" id="useK2"><span>➡️</span> वह PDF यहाँ लगाएँ</button>
+              <a class="btn ghost sm hide" id="dlK2" href="#" download="clean.pdf"><span>⬇️</span> PDF download</a>
+            </div>
+          </div>
+          <input type="file" id="inputK2" accept=".pdf,image/*,.txt" hidden>
+        </div>
+      </div>
+    </div>
+
+    <div id="textMode" class="grid g2 hide">
+      <div class="field">
+        <label for="pasteQ">Question Paper text</label>
+        <textarea id="pasteQ" placeholder="1. Which planet is known as the Red Planet?&#10;(1) Earth (2) Mars (3) Jupiter (4) Saturn&#10;2. ..."></textarea>
+      </div>
+      <div class="field">
+        <label for="pasteK">Answer Key text</label>
+        <textarea id="pasteK" placeholder="Q.No | Answer&#10;1 - A&#10;2 - C&#10;या key के प्रश्न भी साथ में paste कर सकते हैं।"></textarea>
+      </div>
+      <div class="field hide" id="colK2T">
+        <label for="pasteK2">Answer Key text (Official)</label>
+        <textarea id="pasteK2" placeholder="1 - A&#10;2 - C&#10;3 - D&#10;…"></textarea>
+      </div>
+    </div>
+
+    <div class="grid g2 section-gap" style="align-items:end">
+      <div class="field">
+        <label for="marksCorrect">Correct answer marks</label>
+        <input type="number" id="marksCorrect" value="1" step="0.25">
+      </div>
+      <div class="field">
+        <label for="marksWrong">Wrong answer penalty</label>
+        <input type="number" id="marksWrong" value="0" step="0.25">
+      </div>
+    </div>
+
+    <div class="row wrap mt20" style="gap:14px;align-items:center">
+      <button class="btn lg" id="btnMatch"><span>🔗</span> Match &amp; Get Result</button>
+      <span class="small muted">⏱ OCR पर कुल <b>~4 minute</b> से ज़्यादा समय नहीं लगता — जितने pages उसमें पढ़े जाएँ, उतना result मिलता है।</span>
+    </div>
+
+    <div class="progress mt14 hide" id="progWrap"><i id="progBar"></i></div>
+    <div class="prog-line hide" id="progLine"><span id="progTxt">तैयार हो रहा है…</span><span id="progTime"></span></div>
+    <div id="statusBox"></div>
+  </div>
+
+  <div class="grid g3 section-gap">
+    <div class="tile blue">
+      <div class="tic">🔎</div>
+      <div><h3>Best input</h3><p>Answer key में प्रश्न का text भी हो तो matching सबसे accurate होती है। सिर्फ number-key मिले तो Offset / same-number mode use करें।</p></div>
+    </div>
+    <div class="tile green">
+      <div class="tic">📸</div>
+      <div><h3>Photo quality</h3><p>Photo सीधी, साफ और अच्छी रोशनी में लें। धुंधली scan पर OCR गलत पढ़ सकता है — तब text paste mode ज़्यादा भरोसेमंद है।</p></div>
+    </div>
+    <div class="tile purple">
+      <div class="tic">🔒</div>
+      <div><h3>Privacy</h3><p>Upload की गई कोई file upload नहीं होती। PDF पढ़ना और OCR दोनों आपके browser में ही चलते हैं।</p></div>
+    </div>
+  </div>
+
+  <section class="card section-gap hide" id="resultSection">
+    <div class="row between wrap mb16">
+      <div class="card-title" style="margin:0"><span class="ic">✅</span> Matching Completed Successfully!</div>
+      <div class="row wrap" style="gap:8px">
+        <button class="btn ghost sm" id="btnConfirmAll">✓ Meri answers confirm karein</button>
+        <a class="btn green sm" href="result-analysis.html">📊 Full Analysis देखें</a>
+      </div>
+    </div>
+    <p class="muted small mb16">नीचे अपनी answers डालें या बदलें — Score तुरंत update होगा।</p>
+
+    <div class="grid g4 mb16" id="statRow"></div>
+
+    <div class="field mb16">
+      <label for="bulkAnswers">Bulk answer entry (optional)</label>
+      <input type="text" id="bulkAnswers" placeholder="C A D B A ... या 3,1,4,2 — Paper के question number के हिसाब से, Enter दबाएँ">
+    </div>
+
+    <div class="row wrap mb16" style="gap:12px;align-items:end">
+      <div class="field" style="margin:0">
+        <label for="pageSizeSel">एक बार में कितने प्रश्न दिखाएँ</label>
+        <select id="pageSizeSel">
+          <option value="10">10</option>
+          <option value="25" selected>25</option>
+          <option value="50">50</option>
+          <option value="0">सब दिखाएँ</option>
+        </select>
+      </div>
+      <div class="small muted">Har prashn ka pura text aur options niche dikhenge — OCR ne kuch galat padha ho to use theek karke dobara match kar sakte hain.</div>
+    </div>
+
+    <div class="table-wrap">
+      <table class="data" id="resultTable">
+        <thead>
+          <tr>
+            <th class="center">S.No<br><span class="small muted">(Paper)</span></th>
+            <th class="center">Matched Q.No<br><span class="small muted">(Answer Key)</span></th>
+            <th>Question &amp; Options</th>
+            <th class="center">Correct Answer</th>
+            <th class="center">Your Answer</th>
+            <th class="center">Result</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <div class="pager" id="pager"></div>
+
+    <details class="card mt20" id="textPanel">
+      <summary class="sum-bold">🔍 क्या पढ़ा गया — text देखें और सुधारें</summary>
+      <p class="muted small mt14">OCR कभी-कभी Hindi paper के कुछ शब्द बिगाड़ देता है। यहाँ text ठीक करके <b>“दोबारा Match करें”</b> दबाएँ — वही result बेहतर बन जाएगा।</p>
+      <div class="grid g2">
+        <div class="field">
+          <label for="extQ">Question Paper ka text — <span id="extQCount">0</span> प्रश्न मिले</label>
+          <textarea id="extQ" rows="10" spellcheck="false"></textarea>
+        </div>
+        <div class="field">
+          <label for="extK">Answer Key ka text — <span id="extKCount">0</span> entries मिलीं</label>
+          <textarea id="extK" rows="10" spellcheck="false"></textarea>
+        </div>
+      </div>
+      <button class="btn" id="btnRematch"><span>🔁</span> दोबारा Match करें</button>
+    </details>
+  </section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="footer-inner">
+    <div class="brand">
+      <span class="heart">❤️</span>
+      <span class="brand-text">
+        <span class="brand-name">I LOVE EXAM <span class="matcher">MATCHER</span></span>
+        <span class="brand-tag">Match Your Questions - Get Your Result</span>
+      </span>
+    </div>
+    <div class="footer-links">
+      <a href="index.html">Home</a>
+      <a href="how-it-works.html">How It Works</a>
+      <a href="features.html">Features</a>
+      <a href="omr-set.html">OMR Set</a>
+      <a href="upload.html">Upload &amp; Match</a>
+      <a href="result-analysis.html">Result &amp; Analysis</a>
+      <a href="mobile-friendly.html">Mobile</a>
+      <a href="upload-omr.html">Upload OMR Set</a>
+      <a href="match-result.html">Sample Result</a>
+      <a href="about.html">About</a>
+      <a href="login.html">Login / Sign Up</a>
+    </div>
+    <div class="footer-note">© <span data-year>2026</span> I LOVE EXAM MATCHER — Helping Students, Teachers &amp; Institutions. Built with ❤️ for a Smarter Education.</div>
+  </div>
+</footer>
+
+<script src="assets/js/matcher.js?v=26"></script>
+<script src="assets/js/main.js"></script>
+<script src="assets/js/upload.js?v=26"></script>
+</body>
+</html>

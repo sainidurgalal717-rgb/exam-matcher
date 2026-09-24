@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Result &amp; Analysis — I LOVE EXAM MATCHER</title>
+<meta name="description" content="Overall result, score, correct/wrong count और subject-wise analysis — अपना पूरा report एक जगह देखें।">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&family=Caveat:wght@600;700&family=Noto+Sans+Devanagari:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/css/style.css?v=17">
+<link rel="stylesheet" href="assets/css/pages.css?v=17">
+</head>
+<body>
+
+<header class="site-header">
+  <div class="header-inner">
+    <a class="brand" href="index.html">
+      <span class="heart">❤️</span>
+      <span class="brand-text">
+        <span class="brand-name"><span class="love">I</span> <span class="love">LOVE</span> <span class="exam">EXAM</span> <span class="matcher">MATCHER</span></span>
+        <span class="brand-tag">Match Your Questions - Get Your Result</span>
+      </span>
+    </div>
+    <button class="nav-toggle" aria-label="Menu">☰</button>
+    <nav class="nav">
+      <a href="index.html"><span class="ic">🏠</span> Home</a>
+      <a href="how-it-works.html"><span class="ic">⏱️</span> How It Works</a>
+      <a href="features.html"><span class="ic">🔲</span> Features</a>
+      <a href="omr-set.html"><span class="ic">📋</span> OMR Set</a>
+      <a href="about.html"><span class="ic">ℹ️</span> About</a>
+      <a class="auth-btn" href="login.html"><span>👤</span> Login / Sign Up</a>
+    </nav>
+  </div>
+</header>
+
+<main class="page">
+
+  <div class="page-head">
+    <div class="head-ic">📊</div>
+    <div>
+      <h1>Result &amp; Analysis</h1>
+      <p class="sub">Detailed Report for Better Understanding</p>
+    </div>
+  </div>
+
+  <div class="grid g2">
+    <div class="card">
+      <div class="card-title"><span class="ic">🏠</span> Overall Result</div>
+      <div class="row" style="gap:26px;align-items:center;flex-wrap:wrap">
+        <div class="donut-wrap">
+          <div class="donut" id="donut"><span class="pc" id="pct">84%</span></div>
+          <div class="center">
+            <div class="small muted">Score</div>
+            <div class="score-big" id="scoreTxt">84 / 100</div>
+          </div>
+        </div>
+        <div class="col" style="flex:1;min-width:190px">
+          <div class="stat green"><div class="sic">✔</div><div><div class="lbl">Correct</div><div class="val" id="sCorrect">42</div></div></div>
+          <div class="stat red"><div class="sic">✖</div><div><div class="lbl">Wrong</div><div class="val" id="sWrong">8</div></div></div>
+          <div class="stat blue"><div class="sic">📄</div><div><div class="lbl">Total Questions</div><div class="val" id="sTotal">50</div></div></div>
+          <div class="stat purple hide" id="blankCard"><div class="sic">▫</div><div><div class="lbl"> unanswered / No key</div><div class="val" id="sBlank">0</div></div></div>
+        </div>
+      </div>
+      <div class="row wrap mt20" style="gap:10px">
+        <a class="btn ghost sm" href="match-result.html">📋 Question-wise table</a>
+        <a class="btn ghost sm" href="upload.html">🔁 नया match करें</a>
+        <button class="btn sm" onclick="window.print()">🖨️ Print / Save PDF</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title"><span class="ic">📚</span> Subject Wise Analysis</div>
+      <div id="subjects"></div>
+      <p class="small muted mt14" id="subjectNote">Subject buckets प्रश्न के keywords से अपने-आप बनते हैं। यह अनुमानित breakdown है — exact subject list के लिए अपने coaching के syllabus के हिसाब से rows filter करके देखें।</p>
+    </div>
+  </div>
+
+  <section class="card section-gap">
+    <div class="card-title"><span class="ic">🩹</span> गलत हुए प्रश्न — यहीं से सुधार शुरू होता है</div>
+    <div class="table-wrap">
+      <table class="data">
+        <thead>
+          <tr>
+            <th class="center">Paper Q.No</th>
+            <th class="center">Key Q.No</th>
+            <th>Question</th>
+            <th class="center">Correct</th>
+            <th class="center">Your Answer</th>
+          </tr>
+        </thead>
+        <tbody id="wrongRows"></tbody>
+      </table>
+    </div>
+    <p class="small muted mt14" id="wrongNote"></p>
+  </section>
+
+  <div class="grid g3 section-gap">
+    <div class="tile blue"><div class="tic">🎯</div><div><h3>Accuracy</h3><p id="accTxt">—</p></div></div>
+    <div class="tile orange"><div class="tic">⏳</div><div><h3>बचा हुआ समय</h3><p>50 प्रश्नों का मिलान हाथ से करने में 30–60 लगते हैं। यहाँ कुछ ही सेकंड में हो जाता है।</p></div></div>
+    <div class="tile green"><div class="tic">📈</div><div><h3>आगे बढ़ने का तरीका</h3><p>जिस subject में % कम है, पहले वही दोहराएँ — list ऊपर की table से सीधे मिल जाएगी।</p></div></div>
+  </div>
+
+</main>
+
+<footer class="site-footer">
+  <div class="footer-inner">
+    <div class="brand">
+      <span class="heart">❤️</span>
+      <span class="brand-text">
+        <span class="brand-name">I LOVE EXAM <span class="matcher">MATCHER</span></span>
+        <span class="brand-tag">Match Your Questions - Get Your Result</span>
+      </span>
+    </div>
+    <div class="footer-links">
+      <a href="index.html">Home</a>
+      <a href="how-it-works.html">How It Works</a>
+      <a href="features.html">Features</a>
+      <a href="omr-set.html">OMR Set</a>
+      <a href="upload.html">Upload &amp; Match</a>
+      <a href="result-analysis.html">Result &amp; Analysis</a>
+      <a href="mobile-friendly.html">Mobile</a>
+      <a href="upload-omr.html">Upload OMR Set</a>
+      <a href="match-result.html">Sample Result</a>
+      <a href="about.html">About</a>
+      <a href="login.html">Login / Sign Up</a>
+    </div>
+    <div class="footer-note">© <span data-year>2026</span> I LOVE EXAM MATCHER — Helping Students, Teachers &amp; Institutions. Built with ❤️ for a Smarter Education.</div>
+  </div>
+</footer>
+
+<script src="assets/js/matcher.js?v=17"></script>
+<script src="assets/js/result-data.js"></script>
+<script src="assets/js/main.js"></script>
+<script>
+(function () {
+  var data = window.ResultData.get();
+  var s = data.stats;
+  var esc = window.ResultData.esc;
+
+  var pct = s.max > 0 ? Math.round((s.score / s.max) * 100) : 0;
+  document.getElementById('pct').textContent = pct + '%';
+  document.getElementById('scoreTxt').textContent = s.score + ' / ' + s.max;
+  document.getElementById('sCorrect').textContent = s.correct;
+  document.getElementById('sWrong').textContent = s.wrong;
+  document.getElementById('sTotal').textContent = s.total;
+  document.getElementById('donut').style.background =
+    'conic-gradient(#1668f5 ' + pct + '%, #e6eefb ' + pct + '% 100%)';
+
+  var other = (s.blank || 0) + (s.unmatched || 0);
+  if (other) {
+    document.getElementById('blankCard').classList.remove('hide');
+    document.getElementById('sBlank').textContent = other;
+  }
+  var answered = s.correct + s.wrong;
+  document.getElementById('accTxt').textContent = answered
+    ? Math.round((s.correct / answered) * 100) + '% — जितने प्रश्न आपने हल किए, उनमें से उतने सही।'
+    : 'अभी कोई answer confirm नहीं हुआ।';
+
+  /* subject buckets from question keywords */
+  var BUCKETS = [
+    { name: 'Mathematics', re: /\d|\+|-|×|x |sum|hcf|lcm|average|percent|profit|simple interest|ratio|number|square|angle|age of|:.*=/i, cls: 'b1' },
+    { name: 'Science', re: /planet|gas|vitamin|acid|oxygen|water|gravity|sound|light|energy|atmosphere|crop|disease|blood|heat|force|atom|cell/i, cls: 'b2' },
+    { name: 'English', re: /grammar|tense|synonym|antonym|article|preposition|sentence|vocabulary|passage|word|phrase/i, cls: 'b3' },
+    { name: 'Social Science', re: /river|state|capital|constitution|article|dynasty|battle|governor|president|prime minister|slogan|wrote|founder|district|desert|reef|railway|currency|national|discovered|constitution|yoga|established|lives|passed|known as|who |which (state|river|city|country|article|instrument|layer|is the largest|platform)/i, cls: 'b4' }
+  ];
+
+  var tally = {};
+  data.rows.forEach(function (r) {
+    var q = (r.question || '');
+    var hit = null;
+    for (var i = 0; i < BUCKETS.length; i++) {
+      if (BUCKETS[i].re.test(q)) { hit = BUCKETS[i]; break; }
+    }
+    var name = hit ? hit.name : 'Other / General';
+    if (!tally[name]) tally[name] = { total: 0, correct: 0, cls: hit ? hit.cls : 'b5' };
+    tally[name].total++;
+    if (r.state === 'correct') tally[name].correct++;
+  });
+
+  var SAMPLE_SUBJECTS = [
+    { name: 'Mathematics', pctv: 85, cls: 'b1' },
+    { name: 'Science', pctv: 80, cls: 'b2' },
+    { name: 'English', pctv: 90, cls: 'b3' },
+    { name: 'Social Science', pctv: 75, cls: 'b4' }
+  ];
+
+  var list;
+  if (data.sample) {
+    list = SAMPLE_SUBJECTS;
+  } else {
+    list = Object.keys(tally).map(function (n) {
+      var t = tally[n];
+      return { name: n, pctv: t.total ? Math.round((t.correct / t.total) * 100) : 0, cls: t.cls, total: t.total };
+    }).sort(function (a, b) { return b.total - a.total; });
+  }
+
+  document.getElementById('subjects').innerHTML = list.map(function (x) {
+    return '<div class="bar-row"><span>' + esc(x.name) + (x.total ? ' <span class="muted small">(' + x.total + ' Q)</span>' : '') + '</span>' +
+      '<span class="bar ' + x.cls + '"><i style="width:' + x.pctv + '%"></i></span>' +
+      '<span class="center" style="text-align:right"><b>' + x.pctv + '%</b></span></div>';
+  }).join('') || '<p class="muted small">कोई subject bucket नहीं बना — पहले match करें।</p>';
+
+  var wrong = data.rows.filter(function (r) { return r.state === 'wrong' || r.state === 'blank'; });
+  document.getElementById('wrongRows').innerHTML = wrong.length ? wrong.map(function (r) {
+    var q = esc(r.question || ''); if (q.length > 90) q = q.slice(0, 90) + '…';
+    return '<tr><td class="center"><b>' + r.paperNo + '</b></td><td class="center">' + (r.keyNo == null ? '—' : r.keyNo) + '</td>' +
+      '<td class="qprev">' + q + '</td><td class="center"><span class="ans-badge">' + (r.correct || '—') + '</span></td>' +
+      '<td class="center"><span class="ans-badge bad">' + (r.mine || 'blank') + '</span></td></tr>';
+  }).join('') : '<tr><td colspan="5" class="center" style="padding:22px"><span class="chip ok">✔ कोई गलत answer नहीं</span></td></tr>';
+
+  document.getElementById('wrongNote').textContent = wrong.length
+    ? (wrong.length + ' प्रश्न ऐसे हैं जहाँ answer गलत या खाली है। इन्हें दोहराएँ — यही सबसे तेज़ सुधार है।')
+    : 'सभी confirmed answers सही हैं।';
+})();
+</script>
+</body>
+</html>
