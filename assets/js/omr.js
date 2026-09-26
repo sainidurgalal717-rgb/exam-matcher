@@ -37,12 +37,27 @@
   wireDrop('dropS', 'inputS', 's');
   wireDrop('dropK', 'inputK', 'k');
 
-  function read(file, pFrom, pTo) {
-    if (!file) return Promise.resolve('');
+  /* Bubble-sheet photo: detect filled circles pixel-by-pixel; anything else (or a sheet whose
+     bubbles we can't find) falls back to plain text OCR + "1 - A" pair parsing. */
+  function readOne(file, pFrom, pTo) {
+    if (!file) return Promise.resolve([]);
+    if (/^image\//.test(file.type) && M.readOmrSheet) {
+      return M.readOmrSheet(file, {
+        optCount: st.optCount,
+        onProgress: function (p) { progress(pFrom + p * (pTo - pFrom) * 0.7); }
+      }).then(function (bubs) {
+        if (bubs && bubs.length) return bubs;
+        return textPairs(file, pFrom + (pTo - pFrom) * 0.7, pTo);
+      });
+    }
+    return textPairs(file, pFrom, pTo);
+  }
+
+  function textPairs(file, pFrom, pTo) {
     return M.extractText(file, {
       lang: 'eng',
       onProgress: function (p) { progress(pFrom + p * (pTo - pFrom)); }
-    });
+    }).then(function (t) { return M.parseAnswerKey(t || ''); });
   }
 
   $('btnStart').addEventListener('click', function () {
@@ -50,38 +65,40 @@
       status('err', 'File चुनें', 'कम से कम Official Answer Key upload करें। student की answers grid में खुद भी भर सकते हैं।');
       return;
     }
-    this.disabled = true;
+    var self = this;
+    self.disabled = true;
     progress(0.03);
-    status('info', 'Reading OMR files…', 'OCR चल रहा है — scanned sheet पर 15–60 सेकंड लग सकते हैं।');
+    status('info', 'OMR sheets पढ़ी जा रही हैं…', 'Filled bubbles detect हो रहे हैं — 15–60 सेकंड लग सकते हैं।');
 
-    Promise.all([read(st.sFile, 0.03, 0.5), read(st.kFile, 0.5, 0.9)]).then(function (res) {
-      st.sText = res[0] || ''; st.kText = res[1] || '';
-      st.key = M.parseAnswerKey(st.kText);
-      var n = Math.max(1, Math.min(300, parseInt($('qCount').value, 10) || 50));
-      st.optCount = parseInt($('optCount').value, 10) || 4;
+    var n = Math.max(1, Math.min(300, parseInt($('qCount').value, 10) || 50));
+    st.optCount = parseInt($('optCount').value, 10) || 4;
+    st.answers = {};
 
-      // best-effort: read "1 A" style pairs from the student sheet OCR text
-      var auto = M.parseAnswerKey(st.sText);
-      var autoMap = {};
-      auto.forEach(function (a) { if (parseInt(a.answer, 10) > 0 && parseInt(a.answer, 10) <= st.optCount) a.answer = String.fromCharCode(64 + parseInt(a.answer, 10)); st.answers[a.no] = a.answer; autoMap[a.no] = 1; });
+    Promise.all([readOne(st.sFile, 0.03, 0.48), readOne(st.kFile, 0.5, 0.95)]).then(function (res) {
+      (res[0] || []).forEach(function (a) {
+        var d = parseInt(a.answer, 10);
+        if (d > 0 && d <= st.optCount) a.answer = String.fromCharCode(64 + d);
+        if (a.no >= 1 && a.no <= n) st.answers[a.no] = a.answer;
+      });
+      st.key = (res[1] || []).filter(function (a) { return a.no >= 1 && a.no <= 300; });
 
       if (!st.key.length) {
-        status('warn', 'Answer Key से number → answer नहीं मिले',
-          'Key का text manually नीचे grid के बगल में भर सकते हैं, या <a href="upload.html">Upload &amp; Match</a> page पर key की list paste करें।');
+        status('warn', 'Answer Key से answers नहीं मिले',
+          'Key की sheet में filled bubbles नहीं मिले — साफ photo upload करके फिर कोशिश करें, या <a href="upload.html">Upload &amp; Match</a> page पर key की list paste करें।');
       }
       progress(1);
       setTimeout(function () { $('progWrap').classList.add('hide'); }, 400);
-      $('btnStart').disabled = false;
-      buildGrid(n, Object.keys(autoMap).length);
+      self.disabled = false;
+      buildGrid(n, Object.keys(st.answers).length);
     }).catch(function (err) {
-      $('btnStart').disabled = false;
+      self.disabled = false;
       $('progWrap').classList.add('hide');
       status('err', 'Read failed', esc(err.message || err));
     });
   });
 
   function buildGrid(n, autoCount) {
-    $('readPill').innerHTML = '<span class="ck">' + (autoCount ? '✓' : 'i') + '</span> OCR: ' + autoCount + ' auto-read';
+    $('readPill').innerHTML = '<span class="ck">' + (autoCount ? '✓' : 'i') + '</span> Sheet से ' + autoCount + ' answers पढ़े';
     $('gridCard').classList.remove('hide');
     var letters = [];
     for (var i = 0; i < st.optCount; i++) letters.push(String.fromCharCode(65 + i));

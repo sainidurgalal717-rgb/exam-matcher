@@ -274,6 +274,243 @@
     return u;
   }
 
+  /* ---------- OMR bubble detection (pure pixels, no OCR) ----------
+     A printed OMR sheet is a lattice of circles: the filled ones are solid near-black disks, all
+     of one uniform diameter. Everything is measured on a coarse density grid (share of dark
+     pixels per cell) rather than raw pixels, so scanner noise and JPEG blocks still merge into
+     one blob, while a printed empty ring — a thin light stroke — never reaches the threshold.
+
+     Square-ish blobs of the modal size become lattice points; points are grouped into columns,
+     columns into blocks, and only blocks with exactly optCount columns survive — that drops the
+     roll-number grid (10 columns), the corner timing squares (1 column), the question-number
+     column and every piece of printed text. Rows come from the y-lattice of the whole sheet, so
+     an unanswered question still occupies its row and numbering never shifts. Block N starts
+     where N-1 ended, which is how every OMR sheet numbers, so no digit OCR is needed. */
+  function omrFindDisks(px, w, h, optCount, dbg) {
+    optCount = optCount || 4;
+    var info = { comps: 0, cands: 0, D: 0, cells: 0, cols: 0, groups: [], blocks: [] };
+    var f = Math.max(3, Math.min(8, Math.round(w / 380)));
+    var gw = Math.floor(w / f), gh = Math.floor(h / f);
+    var black = new Float32Array(gw * gh);
+    var x, y, i, gx, gy, dx, dy, nb, n, p, r, g, b;
+    for (gy = 0; gy < gh; gy++) {
+      for (gx = 0; gx < gw; gx++) {
+        nb = 0; n = 0;
+        for (dy = 0; dy < f; dy++) {
+          var row = ((gy * f + dy) * w + gx * f) * 4;
+          for (dx = 0; dx < f; dx++) {
+            i = row + dx * 4;
+            r = px[i]; g = px[i + 1]; b = px[i + 2];
+            if ((r > g ? (r > b ? r : b) : (g > b ? g : b)) < 110) nb++;
+            n++;
+          }
+        }
+        black[gy * gw + gx] = nb / n;
+      }
+    }
+
+    /* connected components over the dark-density grid — a filled bubble is a solid blob, while a
+       printed empty ring is a thin light stroke that never reaches the cell threshold */
+    var seen = new Uint8Array(gw * gh), stack = [], comps = [];
+    for (y = 0; y < gh; y++) {
+      for (x = 0; x < gw; x++) {
+        p = y * gw + x;
+        if (!black[p] || seen[p]) continue;
+        var area = 0, x0 = x, x1 = x, y0 = y, y1 = y;
+        stack.length = 0; stack.push(p); seen[p] = 1;
+        while (stack.length) {
+          p = stack.pop(); var cy = (p / gw) | 0, cx = p - cy * gw;
+          area++;
+          if (cx < x0) x0 = cx; if (cx > x1) x1 = cx;
+          if (cy < y0) y0 = cy; if (cy > y1) y1 = cy;
+          if (cx > 0 && black[p - 1] && !seen[p - 1]) { seen[p - 1] = 1; stack.push(p - 1); }
+          if (cx + 1 < gw && black[p + 1] && !seen[p + 1]) { seen[p + 1] = 1; stack.push(p + 1); }
+          if (cy > 0 && black[p - gw] && !seen[p - gw]) { seen[p - gw] = 1; stack.push(p - gw); }
+          if (cy + 1 < gh && black[p + gw] && !seen[p + gw]) { seen[p + gw] = 1; stack.push(p + gw); }
+        }
+        comps.push({ area: area, x0: x0, x1: x1, y0: y0, y1: y1,
+          cx: (x0 + x1) / 2, cy: (y0 + y1) / 2, diag: Math.max(x1 - x0 + 1, y1 - y0 + 1) });
+      }
+    }
+    info.comps = comps.length;
+    if (!comps.length) return { answers: [], blocks: [], _dbg: info };
+
+    /* solid round-ish blobs of the modal size are filled bubbles; text strokes and rules are
+       either not square or not filled, corner squares are the only real look-alikes and those
+       land in a 1-column group that the block test drops */
+    var cands = comps.filter(function (k) {
+      var bw = k.x1 - k.x0 + 1, bh = k.y1 - k.y0 + 1;
+      return bw / bh >= 0.7 && bw / bh <= 1.4 && k.area / (bw * bh) >= 0.5 && k.diag >= 3;
+    });
+    info.cands = cands.length;
+    if (cands.length < optCount * 2) return { answers: [], blocks: [], _dbg: info };
+
+    var hist = {}, best = 0, D = 0;
+    cands.forEach(function (k) {
+      hist[k.diag] = (hist[k.diag] || 0) + 1;
+      if (hist[k.diag] > best) { best = hist[k.diag]; D = k.diag; }
+    });
+    info.D = D;
+    if (D < 3) return { answers: [], blocks: [], _dbg: info };
+
+    var disks = cands.filter(function (k) { return k.diag >= 0.7 * D && k.diag <= 1.4 * D; });
+    info.cells = disks.length;
+    if (disks.length < optCount * 2) return { answers: [], blocks: [], _dbg: info };
+
+    /* columns from the filled bubbles. Option columns sit one bubble-pitch apart, so a block is
+       found as a run of exactly optCount evenly spaced columns — that rejects the Q.No digit
+       column (a bold 0 reads as a disk) and the roll-number grid, which sit at other pitches. */
+    var colX = clusterAxis(disks.map(function (k) { return k.cx; }), Math.max(1, 0.5 * D));
+    var colN = colX.map(function (cx) {
+      return disks.filter(function (k) { return Math.abs(k.cx - cx) < 0.5 * D; }).length;
+    });
+    var colMed = median(colN) || 1;
+    colX = colX.filter(function (cx, ci) { return colN[ci] >= Math.max(2, colMed * 0.25); });
+    info.cols = colX.length;
+    if (colX.length < optCount) return { answers: [], blocks: [], _dbg: info };
+    var cg = [];
+    for (i = 1; i < colX.length; i++) cg.push(colX[i] - colX[i - 1]);
+    if (dbg) { info.colXs = colX.map(function (v) { return Math.round(v * 10) / 10; }); info.gaps = cg.map(function (v) { return Math.round(v * 10) / 10; }); }
+    var pitch = percentile(cg, 0.25) || 1;
+    var runs = [], run = [colX[0]];
+    for (i = 1; i < colX.length; i++) {
+      if (colX[i] - colX[i - 1] > pitch * 1.5) { runs.push(run); run = []; }
+      run.push(colX[i]);
+    }
+    runs.push(run);
+    if (dbg) info.groups = runs.map(function (rn) { return rn.length; });
+
+    var blockCols = [];
+    runs.forEach(function (rn) {
+      var wins = [];
+      for (var s = 0; s + optCount <= rn.length; s++) {
+        var win = rn.slice(s, s + optCount), gaps = [], j;
+        for (j = 1; j < optCount; j++) gaps.push(win[j] - win[j - 1]);
+        var lo = Math.min.apply(null, gaps), hi = Math.max.apply(null, gaps);
+        /* every option column sits one pitch apart; a stray digit column makes the window ragged */
+        if (hi <= pitch * 1.25 && hi <= lo * 1.3) wins.push({ cols: win, rag: hi / lo });
+      }
+      wins.sort(function (a, b) { return a.rag - b.rag; });
+      wins.forEach(function (wn) {
+        var first = wn.cols[0] - 0.5 * D, last = wn.cols[wn.cols.length - 1] + 0.5 * D;
+        var clash = blockCols.some(function (bc) { return first < bc[bc.length - 1] + 0.5 * D && last > bc[0] - 0.5 * D; });
+        if (!clash) blockCols.push(wn.cols);
+      });
+      blockCols.sort(function (a, b) { return a[0] - b[0]; });
+    });
+    if (dbg) info.blockCols = blockCols.map(function (bc) { return bc.map(function (v) { return Math.round(v); }); });
+
+    /* Rows: every block on a printed sheet shares one vertical lattice, so pitch and first row are
+       fitted from the filled bubbles as a whole — a block whose first question nobody answered
+       still starts at row 1. Cluster gaps are counted in whole pitches, so a row that happens to
+       be blank in every block keeps its number instead of pulling the rest up. */
+    var allY = [];
+    blockCols.forEach(function (rn) {
+      disks.forEach(function (k) {
+        if (k.cx >= rn[0] - 0.5 * D && k.cx <= rn[rn.length - 1] + 0.5 * D) allY.push(k.cy);
+      });
+    });
+    var ys = clusterAxis(allY, Math.max(1, 0.5 * D));
+    if (ys.length < 3) return { answers: [], blocks: [], _dbg: info };
+    var ydiff = [];
+    for (i = 1; i < ys.length; i++) ydiff.push(ys[i] - ys[i - 1]);
+    var unit = median(ydiff);
+    var steps = 0;
+    for (i = 1; i < ys.length; i++) steps += Math.max(1, Math.round((ys[i] - ys[i - 1]) / unit));
+    var rowPitch = (ys[ys.length - 1] - ys[0]) / steps;
+    var rows = steps + 1;
+    if (dbg) info.lattice = { rowPitch: Math.round(rowPitch * 100) / 100, top: Math.round(ys[0] * 10) / 10, rows: rows, yClusters: ys.length };
+    if (rows < 3) return { answers: [], blocks: [], _dbg: info };
+
+    var blocks = [];
+    blockCols.forEach(function (rn) {
+      var cy = [];
+      for (i = 0; i < rows; i++) cy.push(ys[0] + i * rowPitch);
+      blocks.push({ cx: rn, cy: cy });
+    });
+    blocks.sort(function (a, b2) { return a.cx[0] - b2.cx[0]; });
+    info.blocks = blocks.map(function (bl) { return { cols: bl.cx.length, rows: bl.cy.length }; });
+    if (!blocks.length) return { answers: [], blocks: [], _dbg: info };
+
+    var answers = [], start = 1;
+    blocks.forEach(function (bl) {
+      bl.start = start;
+      bl.rows = bl.cy.length;
+      start += bl.rows;
+      bl.marks = [];
+      bl.cy.forEach(function (ry, ri) {
+        var best2 = null;
+        bl.cx.forEach(function (rx, ci) {
+          var frac = gridFill(black, gw, gh, rx, ry, 0.34 * D);
+          if (frac >= 0.45 && (!best2 || frac > best2.frac)) best2 = { frac: frac, letter: String.fromCharCode(65 + ci) };
+        });
+        if (best2) {
+          bl.marks.push({ no: bl.start + ri, letter: best2.letter, frac: best2.frac });
+          answers.push({ no: bl.start + ri, answer: best2.letter });
+        }
+      });
+    });
+    return { answers: answers, blocks: blocks.map(function (bl) {
+      return { start: bl.start, rows: bl.rows, cols: bl.cx.length, marks: bl.marks.length };
+    }), _dbg: dbg ? info : undefined };
+  }
+
+  /* 1-D clustering: sorted values merge into one cluster while each stays within gapAbs of the
+     previous value; returns cluster means. */
+  function clusterAxis(vals, gapAbs) {
+    if (!vals.length) return [];
+    var vs = vals.slice().sort(function (a, b) { return a - b; });
+    var out = [], cur = [vs[0]], i;
+    for (i = 1; i < vs.length; i++) {
+      if (vs[i] - vs[i - 1] > gapAbs) { out.push(mean(cur)); cur = []; }
+      cur.push(vs[i]);
+    }
+    out.push(mean(cur));
+    return out;
+  }
+
+  function mean(a) { var s = 0; a.forEach(function (v) { s += v; }); return s / a.length; }
+
+  function median(a) { return percentile(a, 0.5); }
+
+  function percentile(a, q) {
+    if (!a.length) return 0;
+    var s = a.slice().sort(function (x, y) { return x - y; });
+    return s[Math.min(s.length - 1, Math.floor(s.length * q))];
+  }
+
+  /* share of black cells inside a bubble-sized window of the density grid */
+  function gridFill(black, gw, gh, cx, cy, rad) {
+    var n = 0, hit = 0, x, y;
+    for (y = Math.max(0, Math.floor(cy - rad)); y <= Math.min(gh - 1, Math.ceil(cy + rad)); y++) {
+      for (x = Math.max(0, Math.floor(cx - rad)); x <= Math.min(gw - 1, Math.ceil(cx + rad)); x++) {
+        if ((x - cx) * (x - cx) + (y - cy) * (y - cy) > rad * rad) continue;
+        n++;
+        if (black[y * gw + x] > 0.5) hit++;
+      }
+    }
+    return n ? hit / n : 0;
+  }
+
+  /* Browser entry: decode the photo, analyse, return [{no, answer}] best-effort marks. */
+  function readOmrSheet(file, opts) {
+    opts = opts || {};
+    return loadBitmap(file).then(function (bmp) {
+      var w = bmp.width || bmp.naturalWidth, h = bmp.height || bmp.naturalHeight;
+      var s = Math.min(1, 1600 / Math.max(w, h));
+      var c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(w * s));
+      c.height = Math.max(1, Math.round(h * s));
+      var ctx = c.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(bmp, 0, 0, c.width, c.height);
+      if (bmp.close) bmp.close();
+      var img = ctx.getImageData(0, 0, c.width, c.height);
+      var found = omrFindDisks(img.data, c.width, c.height, opts.optCount || 4);
+      if (opts.onProgress) opts.onProgress(1);
+      return found.answers;
+    });
+  }
+
   function ocrPdfPages(file, opts) {
     opts = opts || {};
     var jpegs = jpegPagesFromPdf(opts.buf, opts.pageCount || 0);
@@ -1200,6 +1437,8 @@
     jpegPagesFromPdf: jpegPagesFromPdf,
     pdfFromPages: pdfFromPages,
     buildCleanPdf: buildCleanPdf,
+    omrFindDisks: omrFindDisks,
+    readOmrSheet: readOmrSheet,
     saveResult: saveResult,
     loadResult: loadResult,
     clearResult: clearResult
