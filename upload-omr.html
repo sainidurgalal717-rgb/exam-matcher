@@ -101,18 +101,10 @@
     </div>
     <div class="alert info">
       <div class="a-ic">i</div>
-      <div><b>Circle दबाकर answer चुनें</b>
-      OCR filled bubbles को पूरी तरह भरोसे के साथ नहीं पढ़ पाता, इसलिए पहचानी गई answers यहाँ भर दी जाती हैं — एक-एक कर confirm कर लें। Score सिर्फ confirmed answers पर बनता है।</div>
+      <div><b>OMR sheet से answers अपने आप पढ़ लिए गए हैं</b>
+      Filled bubbles detect होकर यहाँ भर दिए गए हैं — एक-एक कर देख confirm कर लें, गलत हो तो circle दबाकर बदलें। Score सिर्फ confirmed answers पर बनता है।</div>
     </div>
-    <div class="field mt14">
-      <label for="keyText">Answer Key यहाँ paste करें — हर line "1 - A", "2. B", "3-C" जैसी</label>
-      <textarea id="keyText" placeholder="उदाहरण:&#10;1 - A&#10;2. B&#10;3-C 4-D 5-A"></textarea>
-    </div>
-    <div class="row mt14 wrap" style="gap:10px;align-items:center">
-      <button class="btn purple sm" id="btnApplyKey">✓ Key लगाएँ</button>
-      <span class="pill hide" id="keyPill"><span class="ck">✓</span> <span id="keyPillTxt"></span></span>
-    </div>
-    <div id="bubbleGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(232px,1fr));gap:8px;margin-top:14px"></div>
+    <div id="bubbleGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(232px,1fr));gap:8px"></div>
   </section>
 
   <section class="card section-gap hide" id="resultCard">
@@ -166,8 +158,8 @@
   </div>
 </footer>
 
-<script src="assets/js/matcher.js?v=17"></script>
+<script src="assets/js/matcher.js?v=27"></script>
 <script src="assets/js/main.js"></script>
-<script src="assets/js/omr.js?v=18"></script>
+<script src="assets/js/omr.js?v=27"></script>
 </body>
 </html>
