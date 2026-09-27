@@ -160,7 +160,12 @@
         <a class="btn green sm" href="result-analysis.html">📊 Full Analysis देखें</a>
       </div>
     </div>
-    <p class="muted small mb16">नीचे अपनी answers डालें या बदलें — Score तुरंत update होगा।</p>
+    <p class="muted small mb16" id="resultHint">नीचे अपनी answers डालें या बदलें — Score तुरंत update होगा।</p>
+
+    <div class="card mb16 hide" id="confirmBar" style="background:#f0fdf4;border:1.5px solid #86efac;display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;padding:14px 16px">
+      <div><b>Score छपा है — अभी ढका है।</b><div class="muted small">नीचे सारणी में दोनों columns अपने-आप भरे हैं। एक बार देख लें, फिर Score खोलें।</div></div>
+      <button class="btn green" id="btnGetScore">✓ Confirm &amp; Get Score</button>
+    </div>
 
     <div class="grid g4 mb16" id="statRow"></div>
 
@@ -244,8 +249,8 @@
   </div>
 </footer>
 
-<script src="assets/js/matcher.js?v=28"></script>
+<script src="assets/js/matcher.js?v=29"></script>
 <script src="assets/js/main.js"></script>
-<script src="assets/js/upload.js?v=28"></script>
+<script src="assets/js/upload.js?v=29"></script>
 </body>
 </html>
