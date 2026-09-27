@@ -12,6 +12,8 @@
     paper: [], key: [], assign: {},
     answers: {},          // paperNo -> student answer
     override: {},         // paperNo -> correct answer typed by user
+    /* in OMR Set mode the score stays hidden until the student presses Confirm & Get Score */
+    confirmed: false,
     scheme: { correct: 1, wrong: 0 },
     page: 1,
     pageSize: 25,
@@ -232,23 +234,27 @@
      is read with OCR. Every box tries bubbles first and falls back to text, so a key that happens
      to be another bubble sheet — or a student who typed a list — still works with no switch to set. */
   function runOmr() {
-    if (!state.qFile && !state.kFile) {
-      status('err', 'File चुनें', 'Student OMR sheet और Answer Key में से कम से कम एक file तो चुनें।');
+    if (!state.qFile || !state.kFile) {
+      status('err', 'दोनों file चुनें',
+        'Box 1 में <b>student की OMR sheet</b> की photo और Box 2 में <b>सरकारी answer key</b> की photo — दोनों ज़रूरी हैं। तभी Correct Answer का column अपने-आप भरेगा।');
       return;
     }
     state.t0 = Date.now();
     $('btnMatch').disabled = true;
     tick(); tickTimer();
     progress(0.02, 'Files पढ़ी जा रही हैं…');
-    status('info', 'Processing…', 'गोले pixels से और answer key की list OCR से पढ़ी जा रही है — कुछ तोड़ने-जोड़ने की ज़रूरत नहीं।');
+    status('info', 'Processing…', 'गोले pixels से और answer key की table उसकी grid से पढ़ी जा रही है — कुछ तोड़ने-जोड़ने की ज़रूरत नहीं।');
     Promise.all([omrRead('q', 0.04, 0.45), omrRead('k', 0.5, 0.9)]).then(function (res) {
+      if (!res[1].answers.length) {
+        throw new Error('Box 2 (Answer Key) से एक भी सही उत्तर नहीं पढ़ा जा सका। key की साफ़ photo उसी box में डालें, या key की list "✍️ Text paste करें" mode में छाप दें।');
+      }
+      if (!res[0].answers.length) {
+        throw new Error('Box 1 (Student OMR) में भरे हुए गोले नहीं मिले। photo सीधी, रोशनी वाली और साफ़ हो — धुंधली photo में गोले नहीं दिखते।');
+      }
       progress(0.93, 'Result बना रहे हैं…');
       var mine = {}, key = {}, maxNo = 0, n;
       res[0].answers.forEach(function (a) { mine[a.no] = a.answer; maxNo = Math.max(maxNo, a.no); });
       res[1].answers.forEach(function (a) { key[a.no] = a.answer; maxNo = Math.max(maxNo, a.no); });
-      if (!maxNo) {
-        throw new Error('किसी भी file से प्रश्न के number + answer नहीं पढ़े जा सके। photos साफ़ और सीधी हों, फिर दोबारा चलाएँ।');
-      }
       state.paper = []; state.key = []; state.answers = {};
       for (n = 1; n <= maxNo; n++) {
         state.paper.push({ no: n, text: '', alt: '', options: [] });
@@ -257,6 +263,7 @@
       }
       state.assign = M.matchByIdentity(state.paper, state.key);
       state.override = {};
+      state.confirmed = false;
       state.scheme = { correct: parseFloat($('marksCorrect').value) || 1, wrong: parseFloat($('marksWrong').value) || 0 };
       state.page = 1;
       recompute();
@@ -266,17 +273,14 @@
 
   function omrDone(res, maxNo) {
     var secs = state.t0 ? ((Date.now() - state.t0) / 1000).toFixed(1) : '0';
-    var how = [];
-    var said = { gole: 'के भरे गोले पहचानकर', table: 'की printed table की grid से', list: 'की list OCR से' };
-    if (res[0].via) how.push('student sheet ' + said[res[0].via]);
-    if (res[1].via) how.push('answer key ' + said[res[1].via]);
+    var said = { gole: 'भरे गोले पहचानकर', table: 'printed table की grid से', list: 'list OCR से' };
     progress(1, 'पूरा हुआ');
     clearInterval(state.tickH);
     setTimeout(function () { $('progWrap').classList.add('hide'); $('progLine').classList.add('hide'); }, 500);
     $('btnMatch').disabled = false;
-    status('ok', 'Matching Completed Successfully!',
-      'कुल <b>' + maxNo + '</b> प्रश्न, ' + how.join(', ') + ' — <b>' + secs + ' sec</b>।'
-      + '<br>नीचे हर प्रश्न का verdict है। गोलों की photo धुंधली रही तो कुछ प्रश्न खाली (Not Attempted) आ सकते हैं।');
+    status('ok', 'दोनों Answer Set पढ़ लिए गए!',
+      'कुल <b>' + maxNo + '</b> प्रश्न — student: ' + said[res[0].via] + ', key: ' + said[res[1].via] + ' — <b>' + secs + ' sec</b>।'
+      + '<br>नीचे <b>Correct Answer</b> और <b>Your Answer</b> दोनों columns अपने-आप भरे हैं। एक बार देख लें, फिर <b>✓ Confirm &amp; Get Score</b> दबाएँ।');
     $('resultSection').classList.remove('hide');
     $('resultSection').scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
@@ -723,6 +727,8 @@
 
   function render() {
     var r = state.result, s = r.stats, map = state.mode === 'map';
+    /* in OMR Set mode the score waits until the student has read both columns and confirmed */
+    var gate = state.mode === 'omr' && !state.confirmed;
     var low = r.rows.filter(function (x) { return x.confidence > 0 && x.confidence < 0.55; }).length;
     $('statRow').innerHTML = map ? [
       stat('blue', '📄', 'मेरे प्रश्न', s.total),
@@ -735,6 +741,7 @@
       stat('red', '✖', 'Wrong Answers', s.wrong),
       stat('purple', '🏆', 'Total Score', s.score + ' / ' + s.max)
     ].join('');
+    $('statRow').classList.toggle('hide', gate);
     var table = $('resultTable');
     table.classList.toggle('mapmode', map);
     var th = table.querySelectorAll('thead th');
@@ -743,8 +750,15 @@
       th[3].textContent = map ? '—' : 'Correct Answer';
       th[4].textContent = map ? '—' : 'Your Answer';
     }
-    $('bulkAnswers').parentNode.classList.toggle('hide', map);
-    $('btnConfirmAll').classList.toggle('hide', map);
+    /* in an OMR set the two columns already came out of the photos, so there is nothing to type */
+    $('bulkAnswers').parentNode.classList.toggle('hide', map || state.mode === 'omr');
+    $('btnConfirmAll').classList.toggle('hide', map || state.mode === 'omr');
+    $('confirmBar').classList.toggle('hide', !gate);
+    $('resultHint').textContent = gate
+      ? 'नीचे दोनों columns अपने-आप भरे हैं — Correct Answer और आपका उत्तर। एक बार देख लें, फिर ऊपर का Score खोलने वाला button दबाएँ।'
+      : (state.mode === 'omr'
+        ? 'कोई उत्तर बदलना हो तो dropdown बदल दें — Score तुरंत update होगा।'
+        : 'नीचे अपनी answers डालें या बदलें — Score तुरंत update होगा।');
     renderTable();
   }
 
@@ -792,9 +806,17 @@
         ? '<span class="ans-badge">' + row.keyNo + '</span>' + confTag(row)
         : '<span class="chip na">Not matched</span>';
 
-      var correctCell = row.correct
-        ? '<span class="ans-badge">' + esc(row.correct) + '</span>'
-        : '<input type="text" style="width:56px;padding:5px 8px;border:1.5px solid #dbe7f7;border-radius:8px;text-align:center;font-weight:700" data-ovr="' + row.idx + '" value="' + esc(state.override[row.idx] || '') + '" placeholder="—">';
+      var correctCell;
+      if (state.mode === 'omr') {
+        /* read straight off the key photo, and shown as a dropdown exactly like Your Answer —
+           a typing box there reads as "nothing was found", which is not what happened */
+        correctCell = '<select data-ovr="' + row.idx + '"><option value="">—</option>' +
+          opts.map(function (o) { return '<option' + (row.correct === o ? ' selected' : '') + '>' + o + '</option>'; }).join('') + '</select>';
+      } else {
+        correctCell = row.correct
+          ? '<span class="ans-badge">' + esc(row.correct) + '</span>'
+          : '<input type="text" style="width:56px;padding:5px 8px;border:1.5px solid #dbe7f7;border-radius:8px;text-align:center;font-weight:700" data-ovr="' + row.idx + '" value="' + esc(state.override[row.idx] || '') + '" placeholder="—">';
+      }
 
       var mineCell = '<select data-ans="' + row.idx + '"><option value="">—</option>' +
         opts.map(function (o) { return '<option' + (row.mine === o ? ' selected' : '') + '>' + o + '</option>'; }).join('') + '</select>';
@@ -807,6 +829,8 @@
         verdict = row.keyNo != null
           ? '<span class="chip ok">' + (row.method === 'rev' ? 'text से मिला' : 'मिल गया') + '</span>'
           : '<span class="chip na">नहीं मिला</span>';
+      } else if (state.mode === 'omr' && !state.confirmed) {
+        verdict = '<span class="chip na">⏳ Confirm करें</span>';
       }
 
       return '<tr><td class="center"><b>' + row.paperNo + '</b></td><td class="center">' + matched + '</td>' +
@@ -869,6 +893,14 @@
   $('btnConfirmAll').addEventListener('click', function () {
     toast('✓ Answers confirm हो गए — Full Analysis page पर जाकर पूरा report देखें', 'ok');
     M.saveResult(state.result);
+  });
+
+  /* the two-step flow: read both auto-filled columns first, then take the verdict + Score */
+  $('btnGetScore').addEventListener('click', function () {
+    state.confirmed = true;
+    recompute();
+    toast('✓ Score खोल दिया गया', 'ok');
+    $('statRow').scrollIntoView({ behavior: 'smooth', block: 'center' });
   });
 
   /* pdf.js + tesseract.js download in the background while the student fills the form */
