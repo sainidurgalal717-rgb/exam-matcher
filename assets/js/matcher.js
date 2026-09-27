@@ -756,6 +756,9 @@
         ink[p] = ((d[i] * 299 + d[i + 1] * 587 + d[i + 2] * 114) / 1000) < 150 ? 1 : 0;
       }
       function dbg(m) { if (opts.debug) opts.debug(m); }
+      /* the caller knows the real option count when it has the student's sheet in front of it: a
+         4-column sheet cannot have an E among its correct answers, so the model is not offered one */
+      var letters = /^[A-H]{2,8}$/.test(opts.letters || '') ? opts.letters : 'ABCDEFGH';
       var blocks = keyTableBlocks(ink, w, h, dbg);
       dbg('blocks=' + blocks.length + ' rows=' + blocks.map(function (b) { return b.rows.length; }).join(','));
       if (!blocks.length) return [];
@@ -831,7 +834,7 @@
             if (!bx || assign[i] < 0 || seen[assign[i]]) return;
             seen[assign[i]] = 1; reps.push(assign[i]); urls.push(cellUrl(c, bx, 56, 14));
           });
-          return ocrCells(slot, urls, 'ABCDEFGH', 'single_char').then(function (labels) {
+          return ocrCells(slot, urls, letters, 'single_char').then(function (labels) {
             var letterOf = [];
             reps.forEach(function (cid, x) { letterOf[cid] = /^[A-H]$/.test(labels[x]) ? labels[x] : ''; });
             if (opts.onProgress) opts.onProgress(0.7);
@@ -843,7 +846,7 @@
             var rcid = [];
             reps.forEach(function (cid) { if (!letterOf[cid] && byCid[cid]) rcid.push(cid); });
             var again = rcid.length ? ocrCells(slot,
-              rcid.map(function (cid) { return cellUrl(c, byCid[cid], 84, 20); }), 'ABCDEFGH', 'single_char')
+              rcid.map(function (cid) { return cellUrl(c, byCid[cid], 84, 20); }), letters, 'single_char')
               : Promise.resolve([]);
             return again.then(function (lb2) {
               rcid.forEach(function (cid, i) { if (/^[A-H]$/.test(lb2[i])) letterOf[cid] = lb2[i]; });
@@ -852,7 +855,7 @@
                  So a letter that no big cluster claims is settled by the pixels themselves — the
                  glyph is measured against the clusters that were read often enough to be believed
                  and takes the closest of them, instead of a letter the paper never offered. */
-              var count = {}, rank = 'ABCDEFGH', top = -1;
+              var count = {}, rank = letters, top = -1;
               assign.forEach(function (g) { if (g >= 0 && letterOf[g]) count[g] = (count[g] || 0) + 1; });
               Object.keys(count).forEach(function (cid) {
                 if (count[cid] >= 3) { var r = rank.indexOf(letterOf[cid]); if (r > top) top = r; }

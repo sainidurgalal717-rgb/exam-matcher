@@ -245,30 +245,49 @@
     progress(0.02, 'Files पढ़ी जा रही हैं…');
     status('info', 'Processing…', 'गोले pixels से और answer key की table उसकी grid से पढ़ी जा रही है — कुछ तोड़ने-जोड़ने की ज़रूरत नहीं।');
     Promise.all([omrRead('q', 0.04, 0.45), omrRead('k', 0.5, 0.9)]).then(function (res) {
-      if (!res[1].answers.length) {
-        throw new Error('Box 2 (Answer Key) से एक भी सही उत्तर नहीं पढ़ा जा सका। key की साफ़ photo उसी box में डालें, या key की list "✍️ Text paste करें" mode में छाप दें।');
-      }
-      if (!res[0].answers.length) {
-        throw new Error('Box 1 (Student OMR) में भरे हुए गोले नहीं मिले। photo सीधी, रोशनी वाली और साफ़ हो — धुंधली photo में गोले नहीं दिखते।');
-      }
-      progress(0.93, 'Result बना रहे हैं…');
-      var mine = {}, key = {}, maxNo = 0, n;
-      res[0].answers.forEach(function (a) { mine[a.no] = a.answer; maxNo = Math.max(maxNo, a.no); });
-      res[1].answers.forEach(function (a) { key[a.no] = a.answer; maxNo = Math.max(maxNo, a.no); });
-      state.paper = []; state.key = []; state.answers = {};
-      for (n = 1; n <= maxNo; n++) {
-        state.paper.push({ no: n, text: '', alt: '', options: [] });
-        if (key[n]) state.key.push({ no: n, answer: key[n], text: '' });
-        if (mine[n]) state.answers[n - 1] = mine[n];
-      }
-      state.assign = M.matchByIdentity(state.paper, state.key);
-      state.override = {};
-      state.confirmed = false;
-      state.scheme = { correct: parseFloat($('marksCorrect').value) || 1, wrong: parseFloat($('marksWrong').value) || 0 };
-      state.page = 1;
-      recompute();
-      omrDone(res, maxNo);
+      return settleOptionSet(res).then(function () { buildOmrResult(res); });
     }).catch(fail);
+  }
+
+  /* the student's sheet has the option columns printed on it, so it knows how many options the exam
+     offers: a key that comes back with an E on a 4-column sheet has been misread, not out of options,
+     and the key table is read once more with only the letters the sheet actually has */
+  function settleOptionSet(res) {
+    var n = res[0].optCount || 0, key = res[1];
+    state.sheetOpt = n >= 2 && n <= 8 ? n : 0;
+    var allowed = n ? 'ABCDEFGH'.slice(0, n) : '';
+    if (!allowed || key.via !== 'table') return Promise.resolve();
+    if (!key.answers.some(function (a) { return allowed.indexOf(a.answer) < 0; })) return Promise.resolve();
+    progress(0.6, 'Key दोबारा पढ़ रहे हैं (options ' + allowed.split('').join('-') + ')…');
+    return M.readKeyTable(state.kFile, { letters: allowed }).then(function (rows) {
+      if (rows.length >= key.answers.length) key.answers = rows;
+    }, function () { });
+  }
+
+  function buildOmrResult(res) {
+    if (!res[1].answers.length) {
+      throw new Error('Box 2 (Answer Key) से एक भी सही उत्तर नहीं पढ़ा जा सका। key की साफ़ photo उसी box में डालें, या key की list "✍️ Text paste करें" mode में छाप दें।');
+    }
+    if (!res[0].answers.length) {
+      throw new Error('Box 1 (Student OMR) में भरे हुए गोले नहीं मिले। photo सीधी, रोशनी वाली और साफ़ हो — धुंधली photo में गोले नहीं दिखते।');
+    }
+    progress(0.93, 'Result बना रहे हैं…');
+    var mine = {}, key = {}, maxNo = 0, n;
+    res[0].answers.forEach(function (a) { mine[a.no] = a.answer; maxNo = Math.max(maxNo, a.no); });
+    res[1].answers.forEach(function (a) { key[a.no] = a.answer; maxNo = Math.max(maxNo, a.no); });
+    state.paper = []; state.key = []; state.answers = {};
+    for (n = 1; n <= maxNo; n++) {
+      state.paper.push({ no: n, text: '', alt: '', options: [] });
+      if (key[n]) state.key.push({ no: n, answer: key[n], text: '' });
+      if (mine[n]) state.answers[n - 1] = mine[n];
+    }
+    state.assign = M.matchByIdentity(state.paper, state.key);
+    state.override = {};
+    state.confirmed = false;
+    state.scheme = { correct: parseFloat($('marksCorrect').value) || 1, wrong: parseFloat($('marksWrong').value) || 0 };
+    state.page = 1;
+    recompute();
+    omrDone(res, maxNo);
   }
 
   function omrDone(res, maxNo) {
@@ -296,10 +315,10 @@
     return (M.readKeyTable ? M.readKeyTable(file) : Promise.resolve([])).then(function (rows) {
       if (rows.length) return { answers: rows, via: 'table' };
       return M.readOmrSheet(file, { optCount: 4 }).then(function (a) {
-        if (a && a.length) return { answers: a, via: 'gole' };
+        if (a && a.length) return { answers: a, via: 'gole', optCount: 4 };
         /* a 5-option sheet has no 4-column lattice, so the same pass runs once more before text OCR */
         return M.readOmrSheet(file, { optCount: 5 }).then(function (b) {
-          return b && b.length ? { answers: b, via: 'gole' }
+          return b && b.length ? { answers: b, via: 'gole', optCount: 5 }
                                : omrText(file, pFrom + (pTo - pFrom) * 0.25, pTo);
         });
       });
@@ -690,8 +709,8 @@
     var keyForMatch = state.key;
     var rows = M.buildResult(state.paper, keyForMatch, state.assign, state.answers, state.scheme);
     if (state.mode === 'omr') {
-      /* an OMR sheet has no option text to count, so the letters actually marked say how wide it is */
-      state.omrLetters = 4;
+      /* the sheet's printed columns are the real option count; letters seen on either set only widen it */
+      state.omrLetters = state.sheetOpt || 4;
       rows.rows.forEach(function (r) {
         [r.correct, r.mine].forEach(function (v) {
           if (/^[A-H]$/.test(String(v))) state.omrLetters = Math.max(state.omrLetters, v.charCodeAt(0) - 64);
