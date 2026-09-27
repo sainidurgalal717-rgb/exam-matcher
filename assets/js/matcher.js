@@ -539,51 +539,163 @@
     return best;
   }
 
-  function keyTableGrid(ink, w, h) {
+  /* the table's own y-band: the union of the longest unbroken runs of its borders */
+  function tableWindow(ink, w, h, xs) {
+    var top = 1e9, bot = -1;
+    xs.forEach(function (cx) {
+      var e = vLineExtent(ink, w, h, cx);
+      if (e[1] - e[0] < h * 0.15) return;
+      if (e[0] < top) top = e[0];
+      if (e[1] > bot) bot = e[1];
+    });
+    return bot > top ? [top, bot] : null;
+  }
+
+  function colCover(ink, w, x, top, bot) {
+    var y, s = 0;
+    for (y = top; y <= bot; y++) s += ink[y * w + x];
+    return s / (bot - top + 1);
+  }
+
+  /* Each block is measured on its own. A key page is really several small tables pasted side by side
+     and their rows never line up exactly, so one shared lattice throws most rules away — on the
+     100-question DG28 key it kept 4 of 15 vertical lines and 14 of 21 horizontal ones. */
+  function keyTableBlocks(ink, w, h, dbg) {
     var x, y, s, cf = new Float32Array(w);
     for (x = 0; x < w; x++) { s = 0; for (y = 0; y < h; y++) s += ink[y * w + x]; cf[x] = s / h; }
-    var cand = ruleCenters(cf, 0.3);
-    if (cand.length < 6) return null;
-    var bestX = cand[0], bestV = -1;
-    cand.forEach(function (cx) { if (cf[cx] > bestV) { bestV = cf[cx]; bestX = cx; } });
-    var ext = vLineExtent(ink, w, h, bestX);
-    if (ext[1] - ext[0] < h * 0.25) return null;
-    var top = ext[0], bot = ext[1], H = bot - top + 1;
-    cf = new Float32Array(w);
-    for (x = 0; x < w; x++) { s = 0; for (y = top; y <= bot; y++) s += ink[y * w + x]; cf[x] = s / H; }
-    var vr = ruleCenters(cf, 0.9);
-    /* every block is two cells, so its three rules arrive in triples — anything else isn't a table we know */
-    if (vr.length < 6 || vr.length % 3 !== 0) return null;
-    var nb = vr.length / 3, x0 = vr[0], x1 = vr[vr.length - 1];
+    /* A border is mostly dark from top to bottom, a column of printed digits never is — but a scan
+       breaks a border here and there, and then its longest unbroken run is only a strip of the page.
+       So the few still-unbroken lines first give the table's height, and every line is judged again as
+       the share of that band it covers. Without the second pass the last block of the 150-question key
+       (121-150) vanished: 6 of its 20 rules failed only the unbroken-run test. */
+    var raw = ruleCenters(cf, 0.3);
+    var xs = raw.filter(function (cx) {
+      var e = vLineExtent(ink, w, h, cx);
+      return e[1] - e[0] > h * 0.15;
+    });
+    var win = tableWindow(ink, w, h, xs);
+    if (win) {
+      xs = raw.map(function (cx) { return [cx, colCover(ink, w, cx, win[0], win[1])]; })
+        .filter(function (v) { return v[1] > 0.55; })
+        .map(function (v) { return v[0]; });
+      win = tableWindow(ink, w, h, xs) || win;
+    }
+    if (dbg) dbg('lines=' + raw.length + ' kept=' + xs.length + ' lost=' + JSON.stringify(raw.filter(function (v) { return xs.indexOf(v) < 0; })));
+    if (!win) return [];
+    var tris = [], i = 0;
+    while (i + 2 < xs.length) {
+      var tri = findTriple(xs, i);
+      if (!tri) { i++; continue; }
+      tris.push(tri);
+      i = xs.indexOf(tri[2]) + 1;
+    }
+    if (!tris.length) return [];
+    var out = [];
+    tris.forEach(function (tr) {
+      var rows = blockRows(ink, w, h, tr, win[0], win[1]);
+      if (rows) out.push({ tri: tr, rows: rows });
+    });
+    return out;
+  }
+
+  /* three rules whose two cells are about as wide as each other */
+  function findTriple(xs, i) {
+    for (var j = i + 1; j < xs.length; j++) {
+      var d1 = xs[j] - xs[i];
+      if (d1 < 25) continue;
+      if (d1 > 500) break;
+      for (var k = j + 1; k < xs.length; k++) {
+        var d2 = xs[k] - xs[j];
+        if (d2 < d1 * 0.6) continue;
+        if (d2 > d1 * 1.7) break;
+        return [xs[i], xs[j], xs[k]];
+      }
+    }
+    return null;
+  }
+
+  function blockRows(ink, w, h, tri, top, bot) {
+    var x0 = tri[0], x1 = tri[2], y, x, s;
     var rf = new Float32Array(h);
     for (y = top; y <= bot; y++) { s = 0; for (x = x0; x <= x1; x++) s += ink[y * w + x]; rf[y] = s / (x1 - x0 + 1); }
-    var hy = ruleCenters(rf, 0.8);
+    var hy = ruleCenters(rf, 0.7);
     if (hy.length < 7) return null;
     var bands = [], hs = [], i;
     for (i = 1; i < hy.length; i++) { bands.push([hy[i - 1] + 1, hy[i] - 1]); hs.push(hy[i] - hy[i - 1] - 1); }
     hs.sort(function (a, b) { return a - b; });
     var med = hs[hs.length >> 1];
     if (med < 8) return null;
-    /* the header row is taller than the data rows, and so is any wrapped cell: keep the uniform ones */
-    var rows = bands.filter(function (b) {
-      var t = b[1] - b[0] + 1;
-      return t >= med * 0.6 && t <= med * 1.7;
+    /* a rule the scan lost leaves one band of double height: cut it back into rows. The first band is
+       left whole — it is the header ("प्रश्न की क्रम संख्या"), and readKeyTable finds where data starts by
+       looking for the first number cell that actually holds a number. */
+    var rows = [];
+    bands.forEach(function (b, bi) {
+      var ht = b[1] - b[0] + 1, k = bi ? Math.round(ht / med) : 0, q;
+      if (k < 2) { if (ht >= med * 0.5) rows.push(b); return; }
+      for (q = 0; q < k; q++) {
+        rows.push([b[0] + Math.round(q * ht / k), b[0] + Math.round((q + 1) * ht / k) - 1]);
+      }
     });
-    if (rows.length < 5) return null;
-    return { vr: vr, rows: rows, nb: nb };
+    return rows.length >= 6 ? rows : null;
   }
 
-  function inkBox(ink, w, x0, y0, x1, y1) {
-    var mnx = 1e9, mxx = -1, mny = 1e9, mxy = -1, cnt = 0, x, y;
-    for (y = y0; y <= y1; y++) for (x = x0; x <= x1; x++) {
-      if (!ink[y * w + x]) continue;
-      cnt++;
+  /* One cell's ink, with the rules through it erased: a scanned table leaves its borders, and any
+     horizontal rule the band cut badly, inside the cell box, and the bbox then covers the whole cell
+     instead of the letter — on the DG28 key that read six neighbouring answers as the same 'C'.
+     Anything dark across most of the cell's width or height is a line, not a glyph.
+     With `one` only the largest remaining blob is boxed: an answer is a single letter, so a smudge
+     touching its edge is then left out (question 3 of that key was an unreadable 81 px crop until
+     this was done), while a printed number is several blobs and has to keep them all. */
+  function cellBox(ink, w, x0, y0, x1, y1, one) {
+    var wid = x1 - x0 + 1, hgt = y1 - y0 + 1, x, y, i, kept = 0;
+    if (wid < 4 || hgt < 4) return null;
+    var col = new Int32Array(wid), row = new Int32Array(hgt);
+    for (y = 0; y < hgt; y++) for (x = 0; x < wid; x++) {
+      if (!ink[(y0 + y) * w + x0 + x]) continue;
+      col[x]++; row[y]++;
+    }
+    var m = new Uint8Array(wid * hgt);
+    for (y = 0; y < hgt; y++) {
+      if (row[y] > wid * 0.6) continue;
+      for (x = 0; x < wid; x++) {
+        if (!ink[(y0 + y) * w + x0 + x] || col[x] > hgt * 0.6) continue;
+        m[y * wid + x] = 1; kept++;
+      }
+    }
+    if (kept < 7) return null;
+    if (one) {
+      var lab = new Int32Array(m.length), q = [], nl = 0, sizes = [];
+      for (i = 0; i < m.length; i++) {
+        if (!m[i] || lab[i]) continue;
+        var id = ++nl, n = 0;
+        q.length = 0; q.push(i); lab[i] = id;
+        while (q.length) {
+          var j = q.pop(), jx = j % wid, jy = (j / wid) | 0;
+          n++;
+          for (var dy = -1; dy <= 1; dy++) for (var dx = -1; dx <= 1; dx++) {
+            var px = jx + dx, py = jy + dy;
+            if (px < 0 || py < 0 || px >= wid || py >= hgt) continue;
+            var pj = py * wid + px;
+            if (m[pj] && !lab[pj]) { lab[pj] = id; q.push(pj); }
+          }
+        }
+        sizes.push(n);
+      }
+      var big = 0, bid = -1;
+      for (i = 0; i < sizes.length; i++) if (sizes[i] > big) { big = sizes[i]; bid = i + 1; }
+      if (big < 7) return null;
+      for (i = 0; i < m.length; i++) if (lab[i] !== bid) m[i] = 0;
+      kept = big;
+    }
+    var mnx = 1e9, mxx = -1, mny = 1e9, mxy = -1;
+    for (y = 0; y < hgt; y++) for (x = 0; x < wid; x++) {
+      if (!m[y * wid + x]) continue;
       if (x < mnx) mnx = x;
       if (x > mxx) mxx = x;
       if (y < mny) mny = y;
       if (y > mxy) mxy = y;
     }
-    return cnt > 6 ? [mnx, mny, mxx - mnx + 1, mxy - mny + 1, cnt] : null;
+    return [x0 + mnx, y0 + mny, mxx - mnx + 1, mxy - mny + 1, kept];
   }
 
   /* one cell's glyph, shrunk to a fixed box so identical letters land on identical vectors */
@@ -643,71 +755,159 @@
       for (i = 0, p = 0; p < ink.length; i += 4, p++) {
         ink[p] = ((d[i] * 299 + d[i + 1] * 587 + d[i + 2] * 114) / 1000) < 150 ? 1 : 0;
       }
-      var geo = keyTableGrid(ink, w, h);
-      if (!geo) return [];
-      var vr = geo.vr, rows = geo.rows, nb = geo.nb, boxes = [], vecs = [], cents = [], assign = [];
-      for (var b = 0; b < nb; b++) {
-        var ax = vr[b * 3 + 1] + 3, bx = vr[b * 3 + 2] - 2;
-        for (var r = 0; r < rows.length; r++) {
-          var box = inkBox(ink, w, ax, rows[r][0] + 2, bx, rows[r][1] - 1);
-          boxes.push(box);
-          vecs.push(box ? glyphVec(ink, w, box) : null);
-        }
-      }
-      for (i = 0; i < vecs.length; i++) {
-        if (!vecs[i]) { assign.push(-1); continue; }
-        var best = -1, bd = 1e9;
-        for (var j = 0; j < cents.length; j++) {
-          var cv = cents[j], a = vecs[i], sum = 0;
-          for (var k = 0; k < GLYPH_N * GLYPH_N; k++) { var df = a[k] - cv[k]; sum += df < 0 ? -df : df; }
-          if (sum / (GLYPH_N * GLYPH_N) < bd) { bd = sum / (GLYPH_N * GLYPH_N); best = j; }
-        }
-        if (bd < 0.055) assign.push(best);
-        else { cents.push(vecs[i]); assign.push(cents.length - 1); }
-      }
-      /* over-splitting only costs a read or two; merging two letters would score the paper wrongly */
-      if (!cents.length || cents.length > 20) return [];
-      var reps = [], urls = [], seen = {};
-      for (i = 0; i < assign.length; i++) {
-        if (assign[i] < 0 || seen[assign[i]]) continue;
-        seen[assign[i]] = 1; reps.push(assign[i]); urls.push(cellUrl(c, boxes[i], 56, 14));
-      }
-      /* the printed numbers are read at a few checkpoints only: they fix where each block starts and prove
-         the table runs straight down, while every other number comes from that spacing */
-      var checks = [[0, 0], [0, 1]];
-      for (b = 1; b < nb; b++) checks.push([b, 0]);
-      var durls = checks.map(function (ck) {
-        var cb = ck[0], cr = ck[1];
-        var box = inkBox(ink, w, vr[cb * 3] + 3, rows[cr][0] + 2, vr[cb * 3 + 1] - 2, rows[cr][1] - 1);
+      function dbg(m) { if (opts.debug) opts.debug(m); }
+      var blocks = keyTableBlocks(ink, w, h, dbg);
+      dbg('blocks=' + blocks.length + ' rows=' + blocks.map(function (b) { return b.rows.length; }).join(','));
+      if (!blocks.length) return [];
+      function numCrop(bl, r) {
+        var row = bl.rows[r];
+        if (!row) return '';
+        var box = cellBox(ink, w, bl.tri[0] + 4, row[0] + 1, bl.tri[1] - 3, row[1] - 1) ||
+          cellBox(ink, w, bl.tri[0] + 1, row[0], bl.tri[1] - 1, row[1]);
         return box ? cellUrl(c, box, 40, 10) : '';
+      }
+      /* the tight crop first, then the whole band: a block's last row sits against its bottom rule and
+         the pad then cuts the letter itself (question 80 of the DG28 key was lost that way). The rules
+         crossing the wider band are erased by cellBox either way. */
+      function ansCrop(bl, r) {
+        var row = bl.rows[r];
+        if (!row) return null;
+        return cellBox(ink, w, bl.tri[1] + 4, row[0] + 1, bl.tri[2] - 3, row[1] - 1, 1) ||
+          cellBox(ink, w, bl.tri[1] + 1, row[0], bl.tri[2] - 1, row[1], 1);
+      }
+      function digits(s) {
+        var t = String(s || '').replace(/[^0-9]/g, '');
+        return t && t.length <= 3 ? parseInt(t, 10) : 0;
+      }
+      /* A block's rows start below its header, and the only thing that makes a row a header is the
+         number printed under it — so the first rows are read before any answer cell is cropped. */
+      var heads = [];
+      blocks.forEach(function (bl, b) {
+        for (var o = 0; o < 4; o++) { var u = numCrop(bl, o); if (u) heads.push([b, o, u]); }
       });
       return acquireWorker('eng').then(function (slot) {
-        function release(v) { freeSlot(slot); return v; }
         function bail(e) { freeSlot(slot); throw e; }
-        return ocrCells(slot, urls, 'ABCDEFGH', 'single_char').then(function (labels) {
-          if (opts.onProgress) opts.onProgress(0.7);
-          var letterOf = reps.map(function (_, x) { return /^[A-H]$/.test(labels[x]) ? labels[x] : ''; });
-          var empty = [];
-          if (!durls.some(Boolean)) return release(empty);
-          return ocrCells(slot, durls.filter(Boolean), '0123456789', 'single_line').then(function (raw) {
-            var at = [], di = 0;
-            durls.forEach(function (u) { at.push(u ? parseInt(raw[di++], 10) || 0 : 0); });
-            var start = at[0] || (at[1] ? at[1] - 1 : 0);
-            if (!start || (at[0] && at[1] && at[1] !== at[0] + 1)) return release(empty);
-            var per = rows.length, wrong = 0, read = 0;
-            for (b = 1; b < nb; b++) {
-              if (!at[b + 1]) continue;
-              read++;
-              if (at[b + 1] !== start + b * per) wrong++;
+        return ocrCells(slot, heads.map(function (x) { return x[2]; }), '0123456789', 'single_line').then(function (hraw) {
+          /* the header cell can OCR as a stray digit, so a block is taken to start where two printed
+             numbers follow each other — one reading on its own proves nothing */
+          var hi = 0, seq = {};
+          heads.forEach(function (hd) {
+            var v = digits(hraw[hi++]);
+            (seq[hd[0]] = seq[hd[0]] || []).push(v);
+          });
+          var start = {};
+          Object.keys(seq).forEach(function (b) {
+            for (var o = 0; o + 1 < seq[b].length; o++) {
+              if (seq[b][o] && seq[b][o + 1] === seq[b][o] + 1) { start[b] = { o: o, n: seq[b][o] }; break; }
             }
-            if (read && wrong > read / 2) return release(empty);
-            var out = [];
-            for (b = 0; b < nb; b++) for (r = 0; r < per; r++) {
-              var g = assign[b * per + r];
-              if (g >= 0 && letterOf[g]) out.push({ no: start + b * per + r, answer: letterOf[g] });
+          });
+          dbg('raw=' + JSON.stringify(hraw) + ' start=' + JSON.stringify(start));
+          var boxes = [], vecs = [], cents = [], assign = [], base = [], off = 0;
+          blocks.forEach(function (bl, b) {
+            var o = start[b] ? start[b].o : bl.rows.length;
+            base.push(off); off += bl.rows.length;
+            bl.rows.forEach(function (row, r) {
+              var box = r < o ? null : ansCrop(bl, r);
+              boxes.push(box);
+              vecs.push(box ? glyphVec(ink, w, box) : null);
+            });
+          });
+          vecs.forEach(function (v) {
+            if (!v) { assign.push(-1); return; }
+            var best = -1, bd = 1e9;
+            for (var j = 0; j < cents.length; j++) {
+              var cv = cents[j], sum = 0, k;
+              for (k = 0; k < GLYPH_N * GLYPH_N; k++) { var df = v[k] - cv[k]; sum += df < 0 ? -df : df; }
+              if (sum / (GLYPH_N * GLYPH_N) < bd) { bd = sum / (GLYPH_N * GLYPH_N); best = j; }
             }
-            if (opts.onProgress) opts.onProgress(1);
-            return release(out);
+            if (bd < 0.055) assign.push(best);
+            else { cents.push(v); assign.push(cents.length - 1); }
+          });
+          /* over-splitting only costs a read or two; merging two letters would score the paper wrongly */
+          dbg('cells=' + vecs.length + ' cents=' + cents.length);
+          if (!cents.length || cents.length > 20) { freeSlot(slot); return []; }
+          var reps = [], urls = [], seen = {};
+          boxes.forEach(function (bx, i) {
+            if (!bx || assign[i] < 0 || seen[assign[i]]) return;
+            seen[assign[i]] = 1; reps.push(assign[i]); urls.push(cellUrl(c, bx, 56, 14));
+          });
+          return ocrCells(slot, urls, 'ABCDEFGH', 'single_char').then(function (labels) {
+            var letterOf = [];
+            reps.forEach(function (cid, x) { letterOf[cid] = /^[A-H]$/.test(labels[x]) ? labels[x] : ''; });
+            if (opts.onProgress) opts.onProgress(0.7);
+            /* A cluster can be one letter the scan drew slightly differently, and then its small crop
+               reads as nothing — that is how question 80 of the DG28 key was lost. Such a letter is
+               shown once more, much bigger, before its cell is given up on. */
+            var byCid = {};
+            boxes.forEach(function (bx, i) { if (bx && assign[i] >= 0 && !byCid[assign[i]]) byCid[assign[i]] = bx; });
+            var rcid = [];
+            reps.forEach(function (cid) { if (!letterOf[cid] && byCid[cid]) rcid.push(cid); });
+            var again = rcid.length ? ocrCells(slot,
+              rcid.map(function (cid) { return cellUrl(c, byCid[cid], 84, 20); }), 'ABCDEFGH', 'single_char')
+              : Promise.resolve([]);
+            return again.then(function (lb2) {
+              rcid.forEach(function (cid, i) { if (/^[A-H]$/.test(lb2[i])) letterOf[cid] = lb2[i]; });
+              /* A key can only use the options it actually printed, and those always run from A
+                 upwards: on the DG28 key question 80 came back as 'E' from a C smeared at the edge.
+                 So a letter that no big cluster claims is settled by the pixels themselves — the
+                 glyph is measured against the clusters that were read often enough to be believed
+                 and takes the closest of them, instead of a letter the paper never offered. */
+              var count = {}, rank = 'ABCDEFGH', top = -1;
+              assign.forEach(function (g) { if (g >= 0 && letterOf[g]) count[g] = (count[g] || 0) + 1; });
+              Object.keys(count).forEach(function (cid) {
+                if (count[cid] >= 3) { var r = rank.indexOf(letterOf[cid]); if (r > top) top = r; }
+              });
+              /* only clusters carrying enough cells to be trusted may vouch for a letter */
+              var believed = Object.keys(count).filter(function (cid) {
+                return count[cid] >= 3 && rank.indexOf(letterOf[cid]) <= top;
+              });
+              var remap = [];
+              cents.forEach(function (cv, cid) {
+                var l = letterOf[cid];
+                if (top < 0 || (l && rank.indexOf(l) <= top)) return;
+                var best = '', bd = 1e9;
+                believed.forEach(function (gs) {
+                  var g = +gs, gv = cents[g], sum = 0, k;
+                  for (k = 0; k < GLYPH_N * GLYPH_N; k++) { var df = cv[k] - gv[k]; sum += df < 0 ? -df : df; }
+                  sum /= GLYPH_N * GLYPH_N;
+                  if (sum < bd) { bd = sum; best = letterOf[g]; }
+                });
+                if (best) { letterOf[cid] = best; remap.push(cid + ':' + (l || '-') + '>' + best); }
+              });
+              dbg('optionSet=A-' + rank[top] + ' remap=' + JSON.stringify(remap));
+              /* the middle and the last printed numbers show the block really runs straight down */
+              var tails = [];
+              blocks.forEach(function (bl, b) {
+                var st = start[b];
+                if (!st) return;
+                var last = bl.rows.length - 1;
+                [(st.o + last) >> 1, last].forEach(function (r) {
+                  var u = numCrop(bl, r);
+                  if (u) tails.push([b, r, u]);
+                });
+              });
+              dbg('tails=' + tails.length);
+              if (!tails.length) { freeSlot(slot); return []; }
+              return ocrCells(slot, tails.map(function (x) { return x[2]; }), '0123456789', 'single_line').then(function (traw) {
+                var bad = {}, out = [];
+                tails.forEach(function (t, x) {
+                  var st = start[t[0]];
+                  if (digits(traw[x]) !== st.n + (t[1] - st.o)) bad[t[0]] = 1;
+                });
+                dbg('tRaw=' + JSON.stringify(traw) + ' bad=' + JSON.stringify(bad));
+                blocks.forEach(function (bl, b) {
+                  var st = start[b];
+                  if (!st || bad[b]) return;
+                  for (var r = st.o; r < bl.rows.length; r++) {
+                    var g = assign[base[b] + r];
+                    if (g >= 0 && letterOf[g]) out.push({ no: st.n + (r - st.o), answer: letterOf[g] });
+                  }
+                });
+                if (opts.onProgress) opts.onProgress(1);
+                freeSlot(slot);
+                return out;
+              }, bail);
+            }, bail);
           }, bail);
         }, bail);
       });
