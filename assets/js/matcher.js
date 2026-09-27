@@ -511,6 +511,209 @@
     });
   }
 
+  /* ---------------- printed answer-key tables ----------------
+     An official key is usually a ruled table: a few blocks of (question no | correct option) side by side,
+     each block numbered straight down. Handing that page to OCR shuffles the columns into one line — the
+     real one came back as "[31] 8  [6a] B  bo" — so the printed rules are followed instead: they give every
+     cell, and only the single character inside a cell is shown to OCR. The same handful of letters repeat
+     across the sheet, so cells are first grouped by their pixels and each group is recognised once. */
+  var GLYPH_N = 20;
+
+  function ruleCenters(arr, thr) {
+    var out = [], st = -1, i;
+    for (i = 0; i < arr.length; i++) {
+      if (arr[i] > thr) { if (st < 0) st = i; }
+      else if (st >= 0) { out.push(Math.round((st + i - 1) / 2)); st = -1; }
+    }
+    if (st >= 0) out.push(Math.round((st + arr.length - 1) / 2));
+    return out;
+  }
+
+  /* the longest unbroken dark stretch of a column: a table border, nothing else reaches this */
+  function vLineExtent(ink, w, h, x) {
+    var best = [0, 0], cur = -1, y;
+    for (y = 0; y <= h; y++) {
+      if (y < h && ink[y * w + x]) { if (cur < 0) cur = y; }
+      else if (cur >= 0) { if (y - 1 - cur > best[1] - best[0]) best = [cur, y - 1]; cur = -1; }
+    }
+    return best;
+  }
+
+  function keyTableGrid(ink, w, h) {
+    var x, y, s, cf = new Float32Array(w);
+    for (x = 0; x < w; x++) { s = 0; for (y = 0; y < h; y++) s += ink[y * w + x]; cf[x] = s / h; }
+    var cand = ruleCenters(cf, 0.3);
+    if (cand.length < 6) return null;
+    var bestX = cand[0], bestV = -1;
+    cand.forEach(function (cx) { if (cf[cx] > bestV) { bestV = cf[cx]; bestX = cx; } });
+    var ext = vLineExtent(ink, w, h, bestX);
+    if (ext[1] - ext[0] < h * 0.25) return null;
+    var top = ext[0], bot = ext[1], H = bot - top + 1;
+    cf = new Float32Array(w);
+    for (x = 0; x < w; x++) { s = 0; for (y = top; y <= bot; y++) s += ink[y * w + x]; cf[x] = s / H; }
+    var vr = ruleCenters(cf, 0.9);
+    /* every block is two cells, so its three rules arrive in triples — anything else isn't a table we know */
+    if (vr.length < 6 || vr.length % 3 !== 0) return null;
+    var nb = vr.length / 3, x0 = vr[0], x1 = vr[vr.length - 1];
+    var rf = new Float32Array(h);
+    for (y = top; y <= bot; y++) { s = 0; for (x = x0; x <= x1; x++) s += ink[y * w + x]; rf[y] = s / (x1 - x0 + 1); }
+    var hy = ruleCenters(rf, 0.8);
+    if (hy.length < 7) return null;
+    var bands = [], hs = [], i;
+    for (i = 1; i < hy.length; i++) { bands.push([hy[i - 1] + 1, hy[i] - 1]); hs.push(hy[i] - hy[i - 1] - 1); }
+    hs.sort(function (a, b) { return a - b; });
+    var med = hs[hs.length >> 1];
+    if (med < 8) return null;
+    /* the header row is taller than the data rows, and so is any wrapped cell: keep the uniform ones */
+    var rows = bands.filter(function (b) {
+      var t = b[1] - b[0] + 1;
+      return t >= med * 0.6 && t <= med * 1.7;
+    });
+    if (rows.length < 5) return null;
+    return { vr: vr, rows: rows, nb: nb };
+  }
+
+  function inkBox(ink, w, x0, y0, x1, y1) {
+    var mnx = 1e9, mxx = -1, mny = 1e9, mxy = -1, cnt = 0, x, y;
+    for (y = y0; y <= y1; y++) for (x = x0; x <= x1; x++) {
+      if (!ink[y * w + x]) continue;
+      cnt++;
+      if (x < mnx) mnx = x;
+      if (x > mxx) mxx = x;
+      if (y < mny) mny = y;
+      if (y > mxy) mxy = y;
+    }
+    return cnt > 6 ? [mnx, mny, mxx - mnx + 1, mxy - mny + 1, cnt] : null;
+  }
+
+  /* one cell's glyph, shrunk to a fixed box so identical letters land on identical vectors */
+  function glyphVec(ink, w, box) {
+    var v = new Float32Array(GLYPH_N * GLYPH_N);
+    var gw = box[2], gh = box[3], s = Math.min(16 / gw, 16 / gh);
+    var dw = Math.max(1, Math.round(gw * s)), dh = Math.max(1, Math.round(gh * s));
+    var ox = (GLYPH_N - dw) >> 1, oy = (GLYPH_N - dh) >> 1, xx, yy;
+    for (yy = 0; yy < dh; yy++) for (xx = 0; xx < dw; xx++) {
+      v[(oy + yy) * GLYPH_N + ox + xx] =
+        ink[(box[1] + Math.min(gh - 1, Math.floor(yy * gh / dh))) * w +
+            box[0] + Math.min(gw - 1, Math.floor(xx * gw / dw))];
+    }
+    return v;
+  }
+
+  function cellUrl(src, box, targetH, pad) {
+    var s = Math.max(2, Math.min(8, Math.round(targetH / Math.max(1, box[3]))));
+    var c = document.createElement('canvas');
+    c.width = box[2] * s + pad * 2;
+    c.height = box[3] * s + pad * 2;
+    var g = c.getContext('2d');
+    g.fillStyle = '#fff';
+    g.fillRect(0, 0, c.width, c.height);
+    g.imageSmoothingEnabled = true;
+    g.drawImage(src, box[0], box[1], box[2], box[3], pad, pad, box[2] * s, box[3] * s);
+    return c.toDataURL('image/png');
+  }
+
+  /* one worker reads all the small crops in sequence — each is a single glyph, so it stays quick */
+  function ocrCells(slot, urls, whitelist, psm) {
+    var out = [];
+    function next(i) {
+      if (i >= urls.length) return out;
+      return slot.w.recognize(urls[i]).then(function (r) {
+        out.push((((r.data && r.data.text) || '') + '').toUpperCase().replace(/[^A-H0-9]/g, ''));
+        return next(i + 1);
+      });
+    }
+    return slot.w.setParameters({ tessedit_char_whitelist: whitelist, pagesegMode: psm }).then(function () {
+      return next(0);
+    });
+  }
+
+  function readKeyTable(file, opts) {
+    opts = opts || {};
+    return loadBitmap(file).then(function (bmp) {
+      var w0 = bmp.width || bmp.naturalWidth, h0 = bmp.height || bmp.naturalHeight;
+      var s = Math.min(1, 1600 / Math.max(w0, h0));
+      var w = Math.max(1, Math.round(w0 * s)), h = Math.max(1, Math.round(h0 * s));
+      var c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      var ctx = c.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(bmp, 0, 0, w, h);
+      if (bmp.close) bmp.close();
+      var d = ctx.getImageData(0, 0, w, h).data, ink = new Uint8Array(w * h), i, p;
+      for (i = 0, p = 0; p < ink.length; i += 4, p++) {
+        ink[p] = ((d[i] * 299 + d[i + 1] * 587 + d[i + 2] * 114) / 1000) < 150 ? 1 : 0;
+      }
+      var geo = keyTableGrid(ink, w, h);
+      if (!geo) return [];
+      var vr = geo.vr, rows = geo.rows, nb = geo.nb, boxes = [], vecs = [], cents = [], assign = [];
+      for (var b = 0; b < nb; b++) {
+        var ax = vr[b * 3 + 1] + 3, bx = vr[b * 3 + 2] - 2;
+        for (var r = 0; r < rows.length; r++) {
+          var box = inkBox(ink, w, ax, rows[r][0] + 2, bx, rows[r][1] - 1);
+          boxes.push(box);
+          vecs.push(box ? glyphVec(ink, w, box) : null);
+        }
+      }
+      for (i = 0; i < vecs.length; i++) {
+        if (!vecs[i]) { assign.push(-1); continue; }
+        var best = -1, bd = 1e9;
+        for (var j = 0; j < cents.length; j++) {
+          var cv = cents[j], a = vecs[i], sum = 0;
+          for (var k = 0; k < GLYPH_N * GLYPH_N; k++) { var df = a[k] - cv[k]; sum += df < 0 ? -df : df; }
+          if (sum / (GLYPH_N * GLYPH_N) < bd) { bd = sum / (GLYPH_N * GLYPH_N); best = j; }
+        }
+        if (bd < 0.055) assign.push(best);
+        else { cents.push(vecs[i]); assign.push(cents.length - 1); }
+      }
+      /* over-splitting only costs a read or two; merging two letters would score the paper wrongly */
+      if (!cents.length || cents.length > 20) return [];
+      var reps = [], urls = [], seen = {};
+      for (i = 0; i < assign.length; i++) {
+        if (assign[i] < 0 || seen[assign[i]]) continue;
+        seen[assign[i]] = 1; reps.push(assign[i]); urls.push(cellUrl(c, boxes[i], 56, 14));
+      }
+      /* the printed numbers are read at a few checkpoints only: they fix where each block starts and prove
+         the table runs straight down, while every other number comes from that spacing */
+      var checks = [[0, 0], [0, 1]];
+      for (b = 1; b < nb; b++) checks.push([b, 0]);
+      var durls = checks.map(function (ck) {
+        var cb = ck[0], cr = ck[1];
+        var box = inkBox(ink, w, vr[cb * 3] + 3, rows[cr][0] + 2, vr[cb * 3 + 1] - 2, rows[cr][1] - 1);
+        return box ? cellUrl(c, box, 40, 10) : '';
+      });
+      return acquireWorker('eng').then(function (slot) {
+        function release(v) { freeSlot(slot); return v; }
+        function bail(e) { freeSlot(slot); throw e; }
+        return ocrCells(slot, urls, 'ABCDEFGH', 'single_char').then(function (labels) {
+          if (opts.onProgress) opts.onProgress(0.7);
+          var letterOf = reps.map(function (_, x) { return /^[A-H]$/.test(labels[x]) ? labels[x] : ''; });
+          var empty = [];
+          if (!durls.some(Boolean)) return release(empty);
+          return ocrCells(slot, durls.filter(Boolean), '0123456789', 'single_line').then(function (raw) {
+            var at = [], di = 0;
+            durls.forEach(function (u) { at.push(u ? parseInt(raw[di++], 10) || 0 : 0); });
+            var start = at[0] || (at[1] ? at[1] - 1 : 0);
+            if (!start || (at[0] && at[1] && at[1] !== at[0] + 1)) return release(empty);
+            var per = rows.length, wrong = 0, read = 0;
+            for (b = 1; b < nb; b++) {
+              if (!at[b + 1]) continue;
+              read++;
+              if (at[b + 1] !== start + b * per) wrong++;
+            }
+            if (read && wrong > read / 2) return release(empty);
+            var out = [];
+            for (b = 0; b < nb; b++) for (r = 0; r < per; r++) {
+              var g = assign[b * per + r];
+              if (g >= 0 && letterOf[g]) out.push({ no: start + b * per + r, answer: letterOf[g] });
+            }
+            if (opts.onProgress) opts.onProgress(1);
+            return release(out);
+          }, bail);
+        }, bail);
+      });
+    });
+  }
+
   function ocrPdfPages(file, opts) {
     opts = opts || {};
     var jpegs = jpegPagesFromPdf(opts.buf, opts.pageCount || 0);
@@ -1439,6 +1642,7 @@
     buildCleanPdf: buildCleanPdf,
     omrFindDisks: omrFindDisks,
     readOmrSheet: readOmrSheet,
+    readKeyTable: readKeyTable,
     saveResult: saveResult,
     loadResult: loadResult,
     clearResult: clearResult

@@ -226,8 +226,115 @@
     });
   }
 
+  /* ---------------- OMR Set mode ----------------
+     The student's box holds a bubble sheet, which no text OCR can read, so its filled circles are
+     found from pixels; the official key normally arrives as a printed table ("1 C 31 B 61 B …") and
+     is read with OCR. Every box tries bubbles first and falls back to text, so a key that happens
+     to be another bubble sheet — or a student who typed a list — still works with no switch to set. */
+  function runOmr() {
+    if (!state.qFile && !state.kFile) {
+      status('err', 'File चुनें', 'Student OMR sheet और Answer Key में से कम से कम एक file तो चुनें।');
+      return;
+    }
+    state.t0 = Date.now();
+    $('btnMatch').disabled = true;
+    tick(); tickTimer();
+    progress(0.02, 'Files पढ़ी जा रही हैं…');
+    status('info', 'Processing…', 'गोले pixels से और answer key की list OCR से पढ़ी जा रही है — कुछ तोड़ने-जोड़ने की ज़रूरत नहीं।');
+    Promise.all([omrRead('q', 0.04, 0.45), omrRead('k', 0.5, 0.9)]).then(function (res) {
+      progress(0.93, 'Result बना रहे हैं…');
+      var mine = {}, key = {}, maxNo = 0, n;
+      res[0].answers.forEach(function (a) { mine[a.no] = a.answer; maxNo = Math.max(maxNo, a.no); });
+      res[1].answers.forEach(function (a) { key[a.no] = a.answer; maxNo = Math.max(maxNo, a.no); });
+      if (!maxNo) {
+        throw new Error('किसी भी file से प्रश्न के number + answer नहीं पढ़े जा सके। photos साफ़ और सीधी हों, फिर दोबारा चलाएँ।');
+      }
+      state.paper = []; state.key = []; state.answers = {};
+      for (n = 1; n <= maxNo; n++) {
+        state.paper.push({ no: n, text: '', alt: '', options: [] });
+        if (key[n]) state.key.push({ no: n, answer: key[n], text: '' });
+        if (mine[n]) state.answers[n - 1] = mine[n];
+      }
+      state.assign = M.matchByIdentity(state.paper, state.key);
+      state.override = {};
+      state.scheme = { correct: parseFloat($('marksCorrect').value) || 1, wrong: parseFloat($('marksWrong').value) || 0 };
+      state.page = 1;
+      recompute();
+      omrDone(res, maxNo);
+    }).catch(fail);
+  }
+
+  function omrDone(res, maxNo) {
+    var secs = state.t0 ? ((Date.now() - state.t0) / 1000).toFixed(1) : '0';
+    var how = [];
+    var said = { gole: 'के भरे गोले पहचानकर', table: 'की printed table की grid से', list: 'की list OCR से' };
+    if (res[0].via) how.push('student sheet ' + said[res[0].via]);
+    if (res[1].via) how.push('answer key ' + said[res[1].via]);
+    progress(1, 'पूरा हुआ');
+    clearInterval(state.tickH);
+    setTimeout(function () { $('progWrap').classList.add('hide'); $('progLine').classList.add('hide'); }, 500);
+    $('btnMatch').disabled = false;
+    status('ok', 'Matching Completed Successfully!',
+      'कुल <b>' + maxNo + '</b> प्रश्न, ' + how.join(', ') + ' — <b>' + secs + ' sec</b>।'
+      + '<br>नीचे हर प्रश्न का verdict है। गोलों की photo धुंधली रही तो कुछ प्रश्न खाली (Not Attempted) आ सकते हैं।');
+    $('resultSection').classList.remove('hide');
+    $('resultSection').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  function omrRead(which, pFrom, pTo) {
+    var file = state[which + 'File'];
+    if (!file) return Promise.resolve({ answers: [], via: '' });
+    var isImg = /^image\//.test(file.type) || /\.(png|jpe?g|webp|bmp|gif|tif?f)$/i.test(file.name || '');
+    var nm = which === 'q' ? 'Student OMR' : 'Answer Key';
+    progress(pFrom, nm + ' पढ़ रहे हैं…');
+    if (!isImg || !M.readOmrSheet) return omrText(file, pFrom, pTo);
+    /* a ruled answer-key table gives its grid away in a few ms, so checking it first costs nothing */
+    return (M.readKeyTable ? M.readKeyTable(file) : Promise.resolve([])).then(function (rows) {
+      if (rows.length) return { answers: rows, via: 'table' };
+      return M.readOmrSheet(file, { optCount: 4 }).then(function (a) {
+        if (a && a.length) return { answers: a, via: 'gole' };
+        /* a 5-option sheet has no 4-column lattice, so the same pass runs once more before text OCR */
+        return M.readOmrSheet(file, { optCount: 5 }).then(function (b) {
+          return b && b.length ? { answers: b, via: 'gole' }
+                               : omrText(file, pFrom + (pTo - pFrom) * 0.25, pTo);
+        });
+      });
+    });
+  }
+
+  function omrText(file, pFrom, pTo) {
+    var mid = pFrom + (pTo - pFrom) / 2;
+    function ocr(lang, from, to) {
+      return M.extractText(file, {
+        lang: lang,
+        onProgress: function (p) { progress(from + p * (to - from) * 0.9, 'List पढ़ रहे हैं (OCR)…'); }
+      }).then(omrPairs);
+    }
+    return ocr('eng', pFrom, mid).then(function (pairs) {
+      /* a Hindi-headed key table barely reads under the English model — only then pay for both */
+      if (pairs.length >= 5) return { answers: pairs, via: 'list' };
+      return ocr('eng+hin', mid, pTo).then(function (p2) {
+        return { answers: p2.length > pairs.length ? p2 : pairs, via: 'list' };
+      });
+    });
+  }
+
+  /* parseAnswerKey also yields question-text lines with no answer, and numeric answers ("1 - 3");
+     keep usable number → A/B/C/D pairs only */
+  function omrPairs(text) {
+    var out = [];
+    M.parseAnswerKey(text || '').forEach(function (a) {
+      var no = parseInt(a.no, 10), ans = String(a.answer || '').trim().toUpperCase();
+      if (!no || !ans) return;
+      if (/^[1-8]$/.test(ans)) ans = String.fromCharCode(64 + parseInt(ans, 10));
+      if (/^[A-H]$/.test(ans)) out.push({ no: no, answer: ans });
+    });
+    return out;
+  }
+
   function run() {
     var useText = !$('textMode').classList.contains('hide');
+    if (state.mode === 'omr' && !useText) { runOmr(); return; }
     $('btnMatch').disabled = true;
     state.t0 = Date.now();
     state.deadline = state.t0 + (state.slowPass ? OCR_SLOW_BUDGET_MS : OCR_BUDGET_MS);
@@ -578,6 +685,15 @@
   function recompute() {
     var keyForMatch = state.key;
     var rows = M.buildResult(state.paper, keyForMatch, state.assign, state.answers, state.scheme);
+    if (state.mode === 'omr') {
+      /* an OMR sheet has no option text to count, so the letters actually marked say how wide it is */
+      state.omrLetters = 4;
+      rows.rows.forEach(function (r) {
+        [r.correct, r.mine].forEach(function (v) {
+          if (/^[A-H]$/.test(String(v))) state.omrLetters = Math.max(state.omrLetters, v.charCodeAt(0) - 64);
+        });
+      });
+    }
     // apply manual correct-answer overrides
     rows.rows.forEach(function (r) {
       var ov = state.override[r.idx];
@@ -640,7 +756,10 @@
     if (/^\d$/.test(String(row.correct || ''))) return ['1', '2', '3', '4', '5'];
     var src = (row.options || []).join(' ');
     var nums = (src.match(/\(\s*([1-5])\s*\)/g) || []).length;
-    if (state.mode === 'omr' && !/[A-Ha-h][\).:]/.test(src)) return ['1', '2', '3', '4', '5'];
+    if (state.mode === 'omr') {
+      if (/^\d$/.test(String(row.mine || '')) || /^\d$/.test(String(row.correct || ''))) return ['1', '2', '3', '4', '5'];
+      return ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'].slice(0, state.omrLetters || 4);
+    }
     if (nums && !/[A-Ha-h]\s*[\).:]\s*\S/.test(src)) return ['A', 'B', 'C', 'D', 'E'].slice(0, Math.max(2, Math.min(5, nums)));
     return ['A', 'B', 'C', 'D', 'E'];
   }
@@ -649,7 +768,10 @@
     var q = esc(row.question || '').replace(/\s+/g, ' ').trim();
     var alt = esc(row.questionAlt || '').replace(/\s+/g, ' ').trim();
     var opts = (row.options || []).filter(Boolean).map(function (o) { return esc(o).replace(/\s+/g, ' ').trim(); });
-    var html = '<div class="qtext">' + (q || '<i class="muted">प्रश्न का text OCR नहीं पढ़ पाया — नीचे edited text में सुधार करें</i>') + '</div>';
+    var html = '<div class="qtext">' + (q || '<i class="muted">' +
+      (state.mode === 'omr' ? 'OMR Set — यहाँ मिलान प्रश्न के number से हुआ है, text से नहीं'
+                            : 'प्रश्न का text OCR नहीं पढ़ पाया — नीचे edited text में सुधार करें') +
+      '</i>') + '</div>';
     if (alt) html += '<div class="qalt">' + alt + '</div>';
     if (opts.length) html += '<div class="qopts">' + opts.map(function (o) { return '<span>' + o + '</span>'; }).join('') + '</div>';
     if (row.method === 'rev') html += '<div class="small muted mt4">यह number आपके paper के text से पहचाना गया है — text दूसरे paper का दिखाया गया है।</div>';
