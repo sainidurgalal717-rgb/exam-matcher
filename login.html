@@ -71,8 +71,9 @@
     <div class="alert info mt20" style="margin-bottom:0">
       <div class="a-ic">i</div>
       <div><b>यह demo account है</b>
-      इस website का कोई server नहीं है, इसलिए account और password इसी browser (localStorage) में सुरक्षित रूप से local रहते हैं।
-      कोई भी email/mobile भेजा या कहीं upload नहीं किया जाता। Match किए गए results भी इसी device पर save रहते हैं।</div>
+      इस website का कोई backend server नहीं है, इसलिए account और password इसी browser (localStorage) में सुरक्षित रूप से local रहते हैं।
+      कोई भी email/mobile कहीं नहीं भेजा जाता। Match किए गए results भी इसी device पर save रहते हैं।
+      (Paper match में scanned PDF / photo की pages reading के लिए AI — Google Gemini / Groq — को भेजी जाती हैं।)</div>
     </div>
   </div>
 
@@ -97,7 +98,7 @@
 
   <div class="grid g3 section-gap" style="max-width:960px;margin-left:auto;margin-right:auto">
     <div class="tile blue"><div class="tic">💾</div><div><h3>Result याद रहता है</h3><p>एक बार match करें — result इस browser में save रहता है, दोबारा खोलकर देख सकते हैं।</p></div></div>
-    <div class="tile green"><div class="tic">🔐</div><div><h3>Koi server nahi</h3><p>na file upload hoti hai, na password kahin bheja jata hai. sab kuch aapke device par.</p></div></div>
+    <div class="tile green"><div class="tic">🔐</div><div><h3>Koi backend nahi</h3><p>account, password aur results aapke device par hi rehte hain. (scan/photo की pages reading ke liye AI ko jaati hain.)</p></div></div>
     <div class="tile purple"><div class="tic">⚡</div><div><h3>Account ke bina bhi chalega</h3><p>Login optional hai — matching aur result bina account ke poori tarah kaam karta hai.</p></div></div>
   </div>
 
@@ -129,7 +130,7 @@
   </div>
 </footer>
 
-<script src="assets/js/matcher.js?v=40"></script>
+<script src="assets/js/matcher.js?v=42"></script>
 <script src="assets/js/main.js"></script>
 <script>
 (function () {

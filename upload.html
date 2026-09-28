@@ -129,7 +129,7 @@
 
     <div class="row wrap mt20" style="gap:14px;align-items:center">
       <button class="btn lg" id="btnMatch"><span>🔗</span> Match &amp; Get Result</button>
-      <span class="small muted">⏱ OCR पर कुल <b>~4 minute</b> से ज़्यादा समय नहीं लगता — जितने pages उसमें पढ़े जाएँ, उतना result मिलता है।</span>
+      <span class="small muted">⏱ PDF का text सेकंडों में पढ़ा जाता है; scan / photo की pages AI से पढ़ने में कुछ minute लग सकते हैं।</span>
     </div>
 
     <div class="progress mt14 hide" id="progWrap"><i id="progBar"></i></div>
@@ -144,11 +144,11 @@
     </div>
     <div class="tile green">
       <div class="tic">📸</div>
-      <div><h3>Photo quality</h3><p>Photo सीधी, साफ और अच्छी रोशनी में लें। धुंधली scan पर OCR गलत पढ़ सकता है — तब text paste mode ज़्यादा भरोसेमंद है।</p></div>
+      <div><h3>Photo quality</h3><p>Photo सीधी, साफ और अच्छी रोशनी में लें। धुंधली scan पर AI भी गलत पढ़ सकता है — तब text paste mode ज़्यादा भरोसेमंद है।</p></div>
     </div>
     <div class="tile purple">
       <div class="tic">🔒</div>
-      <div><h3>Privacy</h3><p>Upload की गई कोई file upload नहीं होती। PDF पढ़ना और OCR दोनों आपके browser में ही चलते हैं।</p></div>
+      <div><h3>Privacy</h3><p>PDF का text आपके browser में ही पढ़ा जाता है — file किसी server पर save नहीं होती। हाँ, scanned PDF / photo की pages AI (Google Gemini / Groq) से पढ़ी जाती हैं, इसलिए वही pages AI को भेजी जाती हैं। Text paste mode में कुछ भी बाहर नहीं जाता।</p></div>
     </div>
   </div>
 
@@ -249,8 +249,9 @@
   </div>
 </footer>
 
-<script src="assets/js/matcher.js?v=40"></script>
+<script src="assets/js/matcher.js?v=42"></script>
 <script src="assets/js/main.js"></script>
-<script src="assets/js/upload.js?v=37"></script>
+<script src="assets/js/ai.js?v=1"></script>
+<script src="assets/js/upload.js?v=39"></script>
 </body>
 </html>
