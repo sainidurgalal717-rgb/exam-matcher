@@ -44,6 +44,7 @@
     if (/^image\//.test(file.type) && M.readOmrSheet) {
       return M.readOmrSheet(file, {
         optCount: st.optCount,
+        qCount: st.qCount,
         onProgress: function (p) { progress(pFrom + p * (pTo - pFrom) * 0.7); }
       }).then(function (bubs) {
         if (bubs && bubs.length) return bubs;
@@ -72,6 +73,7 @@
 
     var n = Math.max(1, Math.min(300, parseInt($('qCount').value, 10) || 50));
     st.optCount = parseInt($('optCount').value, 10) || 4;
+    st.qCount = n;
     st.answers = {};
 
     Promise.all([readOne(st.sFile, 0.03, 0.48), readOne(st.kFile, 0.5, 0.95)]).then(function (res) {

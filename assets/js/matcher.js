@@ -12,6 +12,14 @@
   var PDFJS_CDN = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
   var PDFJS_WORKER = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
   var TESS_CDN = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js';
+  /* OEM=1's default CDN serves the integer-quantized Hindi model; on real scans it drops matras and
+     joins words wrong. The float "best" model is what makes Hindi readable — ~11 MB gz, downloaded
+     once and then served from the browser's IndexedDB cache. */
+  var TESS_LANG_PATH = 'https://tessdata.projectnaptha.com/4.0.0_best';
+  /* traineddata is cached under "<cachePath>/<lang>.traineddata" — langPath is NOT part of that key,
+     so without a versioned cachePath the old quantized model would keep winning forever. Bump this
+     string whenever the model folder changes. */
+  var TESS_CACHE_V = 'best-v1';
 
   var loaded = {};
   function loadScript(src, key) {
@@ -35,33 +43,42 @@
   var CORES = (global.navigator && global.navigator.hardwareConcurrency) || 4;
   var OCR_POOL_SIZE = Math.max(2, Math.min(3, CORES - 1));
   var pools = {};
+  /* who is waiting for a worker of each language — any freed slot hands itself to the longest
+     waiter, whatever slot it was (a freed slot must never sit idle while someone waits) */
+  var waiters = {};
 
   function tesseractReady() { return loadScript(TESS_CDN, 'tess'); }
 
   function freeSlot(slot) {
     slot.busy = false;
-    var q = slot.waiters.shift();
+    var q = (waiters[slot.lang] || (waiters[slot.lang] = [])).shift();
     if (q) { slot.busy = true; q(slot); }
   }
 
   function acquireWorker(lang) {
+    lang = lang || 'eng';
     var list = pools[lang] || (pools[lang] = []);
     for (var i = 0; i < list.length; i++) {
       if (!list[i].busy) { list[i].busy = true; return Promise.resolve(list[i]); }
     }
     if (list.length < OCR_POOL_SIZE) {
-      var slot = { busy: true, w: null, waiters: [], onProgress: null };
+      var slot = { busy: true, w: null, onProgress: null, lang: lang };
       list.push(slot);
       return tesseractReady().then(function () {
-        return global.Tesseract.createWorker(lang, 1, {
+        var opts = {
           logger: function (m) {
             if (slot.onProgress && m.status === 'recognizing text') slot.onProgress(m.progress);
           }
-        });
+        };
+        /* the eng-only OMR reader stays on the light default model; only Hindi pays the big download */
+        if (lang.indexOf('hin') >= 0) { opts.langPath = TESS_LANG_PATH; opts.cachePath = TESS_CACHE_V; }
+        return global.Tesseract.createWorker(lang, 1, opts);
       }).then(function (w) { slot.w = w; return slot; },
         function (e) { list.splice(list.indexOf(slot), 1); throw e; });
     }
-    return new Promise(function (res) { list[0].waiters.push(res); });
+    return new Promise(function (res) {
+      (waiters[lang] || (waiters[lang] = [])).push(res);
+    });
   }
 
   /* Load the OCR script (cheap) + optionally its worker and language model (heavy). */
@@ -268,6 +285,258 @@
     for (i = 0; i < total; i++) gray[i] += (gray[i] - blur[i]) * 0.8;
   }
 
+  /* ---------- two-column bilingual scans ----------
+     A Hindi-medium paper prints every question twice, side by side. Tesseract sees the sheet as one
+     text block and glues both halves onto a single line — and the number strip is what it mangles
+     first, which is why such a scan gives back a third of its questions and almost no Hindi. The
+     empty vertical channel between the two columns says exactly where to cut. */
+  function gutterX(ctx, w, h, report) {
+    var d = ctx.getImageData(0, 0, w, h).data;
+    var step = Math.max(1, Math.floor(h / 400)), rows = 0, x, y, k;
+    var ink = new Float64Array(w);
+    for (y = 0; y < h; y += step) {
+      var row = y * w;
+      for (x = 0; x < w; x++) {
+        var i = (row + x) * 4;
+        if ((d[i] * 299 + d[i + 1] * 587 + d[i + 2] * 114) / 1000 < 140) ink[x]++;
+      }
+      rows++;
+    }
+    /* averaged over ±5 px: a hairline inside a glyph is not a channel, and a printed rule is darker
+       than any gap, so neither can pass for one */
+    var sm = new Float64Array(w), s, c;
+    for (x = 0; x < w; x++) {
+      s = 0; c = 0;
+      for (k = x - 5; k <= x + 5; k++) if (k >= 0 && k < w) { s += ink[k]; c++; }
+      sm[x] = s / c / (rows || 1);
+    }
+    var sorted = Float64Array.from(sm).sort(), med = sorted[sorted.length >> 1];
+    var lo = Math.floor(w * 0.34), hi = Math.ceil(w * 0.66), x2, run = null, best = null, runs = [];
+    /* only a nearly ink-free channel counts; the question-number strip is sparse but not empty */
+    var thr = Math.min(0.04, med * 0.15), dense = med * 0.45;
+    function close() {
+      if (run) {
+        runs.push([run[0], run[1]]);
+        if (!best || run[1] - run[0] > best[1] - best[0]) best = run;
+      }
+      run = null;
+    }
+    for (x2 = lo; x2 < hi; x2++) {
+      if (sm[x2] <= thr) { if (!run) run = [x2, x2 + 1]; else run[1] = x2 + 1; }
+      else close();
+    }
+    close();
+    if (!best || best[1] - best[0] < 10) { if (report) report({ w: w, med: med, thr: thr, runs: runs, x: -1 }); return -1; }
+    /* walk left off the channel, across the sparse strip of hanging question numbers, up to the
+       dense edge of the left column: cutting inside that strip splits every number in half and
+       leaves the right column with no numbering at all */
+    var lim = Math.max(lo + 2, best[0] - Math.round(w * 0.06)), g = best[0];
+    while (g > lim && sm[g - 1] < dense) g--;
+    var minv = Infinity;
+    for (x2 = g; x2 < best[1]; x2++) if (sm[x2] < minv) minv = sm[x2];
+    var la = 0, ra = 0, ln = 0, rn = 0;
+    for (x2 = lo; x2 < g; x2++) { la += sm[x2]; ln++; }
+    for (x2 = g + 1; x2 < hi; x2++) { ra += sm[x2]; rn++; }
+    la /= ln || 1; ra /= rn || 1;
+    if (report) report({ x: g, run: best, runs: runs, sm: sm, min: minv, med: med, left: la, right: ra, w: w, thr: thr });
+    if (la < med * 0.25 || ra < med * 0.25) return -1;   // one half is blank — not a two-column page
+    return g;
+  }
+
+  /* A bilingual page prints the same questions twice, one column per language, and often only one of
+     the two columns keeps its printed numbers readable. The column that has its numbers therefore
+     lends them to the other one, block by block, so the two halves of question N fold into a single
+     row that shows both languages exactly as the paper prints them. */
+  function splitBlocks(text) {
+    var lines = String(text || '').split('\n'), out = [], cur = null;
+    lines.forEach(function (l) {
+      var m = l.match(Q_START) || l.match(HINDI_Q);
+      if (m && parseInt(m[1], 10) > 0) {
+        if (cur) out.push(cur);
+        cur = { no: parseInt(m[1], 10), lines: [m[2]] };
+      } else if (cur) cur.lines.push(l);
+      else out.push({ no: null, lines: [l] }), cur = out[out.length - 1];
+    });
+    if (cur && out[out.length - 1] !== cur) out.push(cur);
+    return out.map(function (b) {
+      return { no: b.no, text: b.lines.join('\n').replace(/\s+/g, ' ').trim() };
+    }).filter(function (b) { return b.text.length > 1; });
+  }
+
+  function leadNo(text) {
+    return String(text || '').replace(/^\s*(?:Q(?:uestion)?[\s.:#-]*|प्र[श्]?\s*[.:\s-]*)?[०-९0-9]{1,3}\s*[).:\-॰°]\s*/, '');
+  }
+
+  function zipColumns(left, right) {
+    var a = splitBlocks(left), b = splitBlocks(right);
+    function counted(list) { return list.filter(function (x) { return x.no; }).length; }
+    if (!a.length || !b.length || a.length !== b.length) return left + '\n' + right;
+    if (!counted(a) && !counted(b)) return left + '\n' + right;
+    var nos = counted(a) >= counted(b) ? a : b, other = nos === a ? b : a, out = [], i;
+    for (i = 0; i < nos.length; i++) {
+      var label = nos[i].no ? nos[i].no + '. ' : '';
+      out.push(label + leadNo(other[i].text));
+      out.push(label + leadNo(nos[i].text));
+    }
+    return out.join('\n');
+  }
+
+  /* same OCR as ocrImageSource, but keeps every line's box: a two-column paper prints Hindi and
+     English at the SAME heights, so lines can be bound by y-position even when one side's printed
+     question numbers did not survive OCR */
+  function ocrLines(source, lang, onProgress) {
+    return acquireWorker(lang || 'eng').then(function (slot) {
+      slot.onProgress = onProgress || null;
+      function done(out) { slot.onProgress = null; freeSlot(slot); return linesFromResult(out); }
+      function fail(e) { slot.onProgress = null; freeSlot(slot); throw e; }
+      return slot.w.recognize(source).then(done, fail);
+    });
+  }
+
+  function linesFromResult(out) {
+    var d = out && out.data;
+    if (!d) return null;
+    var res = [];
+    function boxOf(ln) {
+      var b = ln.bbox, w = ln.words || [], i, x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      if (b) return b;
+      for (i = 0; i < w.length; i++) {
+        if (!w[i].bbox) continue;
+        x0 = Math.min(x0, w[i].bbox.x0); y0 = Math.min(y0, w[i].bbox.y0);
+        x1 = Math.max(x1, w[i].bbox.x1); y1 = Math.max(y1, w[i].bbox.y1);
+      }
+      return isFinite(x0) ? { x0: x0, y0: y0, x1: x1, y1: y1 } : { x0: 0, y0: 0, x1: 0, y1: 0 };
+    }
+    function push(text, b) {
+      text = String(text || '').replace(/\s+/g, ' ').trim();
+      if (text) res.push({ text: text, y0: b.y0 || 0, y1: b.y1 || 0 });
+    }
+    (d.blocks || []).forEach(function (blk) {
+      (blk.paragraphs || []).forEach(function (par) {
+        (par.lines || []).forEach(function (ln) {
+          push(typeof ln.text === 'string' ? ln.text : (ln.words || []).map(function (w) { return w.text; }).join(' '), boxOf(ln));
+        });
+      });
+    });
+    if (res.length) return res;
+    (d.lines || []).forEach(function (ln) {
+      push(ln.text, boxOf(ln));
+    });
+    return res.length ? res : null;
+  }
+
+  /* printed numbers anchor the column that kept them; the other column is bound row-by-row.
+     Returns null when pairing would be guesswork, so the caller can fall back to text order. */
+  function pairLinesByY(leftLines, rightLines) {
+    if (!leftLines || !rightLines || !leftLines.length || !rightLines.length) return null;
+    function qNo(ln) {
+      var m = String(ln.text).match(Q_START);
+      return (m && parseInt(m[1], 10) > 0) ? parseInt(m[1], 10) : null;
+    }
+    function countQ(lines) { var c = 0; lines.forEach(function (l) { if (qNo(l) != null) c++; }); return c; }
+    var lq = countQ(leftLines), rq = countQ(rightLines);
+    if (!lq && !rq) return null;
+    var eng = rq >= lq ? rightLines : leftLines;
+    var dev = eng === rightLines ? leftLines : rightLines;
+
+    var blocks = [], cur = null, head = [];
+    eng.forEach(function (ln) {
+      var n = qNo(ln);
+      if (n != null) { cur = { no: n, lines: [ln] }; blocks.push(cur); }
+      else if (cur) cur.lines.push(ln);
+      else head.push(ln);
+    });
+    if (blocks.length + (head.length ? 1 : 0) < 2) return null;
+
+    /* both crops share one page height, so y values compare directly; tolerance absorbs skew */
+    var hs = eng.map(function (l) { return Math.max(4, l.y1 - l.y0); }).sort(function (a, b) { return a - b; });
+    var tol = (hs[hs.length >> 1] || 10) * 0.9;
+
+    var out = [], used = {}, paired = 0;
+    function bind(lines, no) {
+      if (!lines.length) return;
+      var y0 = lines[0].y0 - tol, y1 = lines[lines.length - 1].y1 + tol;
+      var hin = [], i, yc;
+      for (i = 0; i < dev.length; i++) {
+        if (used[i]) continue;
+        yc = (dev[i].y0 + dev[i].y1) / 2;
+        if (yc >= y0 && yc <= y1) { hin.push(dev[i].text); used[i] = 1; paired++; }
+      }
+      var etext = lines.map(function (l) { return l.text; }).join(' ');
+      var label = no != null ? no + '. ' : '';
+      if (hin.length) out.push(label + hin.join(' '));
+      out.push(label + etext);
+    }
+    bind(head, null);
+    blocks.forEach(function (b) { bind(b.lines, b.no); });
+    if (paired < Math.ceil(dev.length * 0.25)) return null;
+    return tidyLines(out.join('\n'));
+  }
+
+  function ocrColumnPair(a, b, lang, report) {
+    /* one worker at a time per column: a job that holds a slot while asking for a second one is
+       what deadlocks a small pool once two papers are read at the same time */
+    return ocrLines(a, lang, report).then(function (la) {
+      return ocrLines(b, lang, report).then(function (lb) {
+        var z = pairLinesByY(la, lb);
+        if (z) return z;
+        /* line boxes missing on a side — re-read as plain text rather than trusting half a page */
+        if (!la || !la.length || !lb || !lb.length) return rereadColumns(a, b, lang, report);
+        return zipColumns(
+          la.map(function (l) { return l.text; }).join('\n'),
+          lb.map(function (l) { return l.text; }).join('\n'));
+      }, function () { return rereadColumns(a, b, lang, report); });
+    }, function () { return rereadColumns(a, b, lang, report); });
+  }
+
+  function rereadColumns(a, b, lang, report) {
+    return ocrImageSource(a, lang, report).then(function (ta) {
+      return ocrImageSource(b, lang, report).then(function (tb) { return zipColumns(ta, tb); });
+    });
+  }
+
+  function columnCrops(canvas, g, enhance) {
+    var out = [], h = canvas.height, i;
+    for (i = 0; i < 2; i++) {
+      var x0 = i ? g : 0, w = (i ? canvas.width - g : g);
+      if (w < 20) return null;
+      var c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      var ctx = c.getContext('2d', { willReadFrequently: true });
+      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h);
+      ctx.drawImage(canvas, x0, 0, w, h, 0, 0, w, h);
+      if (enhance) enhanceForOcr(ctx, w, h);
+      out.push(c.toDataURL('image/jpeg', 0.92));
+    }
+    return out;
+  }
+
+  /* page image → { crops: [left, right] } when it is a two-column scan, else { url } for the whole
+     page. The gutter is measured before any enhancement so both branches see the same pixels. */
+  function pageColumns(bmp, edge, enhance, report) {
+    var w = bmp.width || bmp.naturalWidth, h = bmp.height || bmp.naturalHeight;
+    var s = Math.min(1, edge / Math.max(w, h));
+    var c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(w * s));
+    c.height = Math.max(1, Math.round(h * s));
+    var ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+    ctx.drawImage(bmp, 0, 0, c.width, c.height);
+    if (bmp.close) bmp.close();
+    var g = gutterX(ctx, c.width, c.height, report);
+    if (g >= 0) {
+      var crops = columnCrops(c, g, enhance);
+      if (crops) return { crops: crops, gutter: g };
+    }
+    if (enhance) enhanceForOcr(ctx, c.width, c.height);
+    return { url: c.toDataURL(enhance ? 'image/jpeg' : 'image/png', 0.92) };
+  }
+
+  function columnPair(bmp, edge, enhance, report) {
+    var r = pageColumns(bmp, edge, enhance, report);
+    return r.crops || null;
+  }
+
   function base64Bytes(dataUrl) {
     var b = atob(dataUrl.slice(dataUrl.indexOf(',') + 1)), u = new Uint8Array(b.length), i;
     for (i = 0; i < b.length; i++) u[i] = b.charCodeAt(i);
@@ -455,6 +724,496 @@
     }), _dbg: dbg ? info : undefined };
   }
 
+  /* ---------- OMR bubble detection for a handheld photo ----------
+     The pass above reads a flat scan; a photo of the same sheet breaks it — the page is tilted a
+     little, a shadow walks under the ink, and a ballpoint is not "black". This pass measures the
+     sheet instead of assuming it: the ink itself gives the row lattice (shear-corrected, so a
+     tilted photo still lines up), the printed rings give each block's option columns, and then
+     every slot of that lattice is asked one question — is there a solid ink disk in the bubble?
+     It reads the sheet the way a person does, without knowing the paper's brightness or the light. */
+  function omrLatticeScan(px, w, h, optCount, dbg, qCount) {
+    optCount = optCount || 4;
+    var info = { a: 0, off: 0, P: 0, r0: 0, rows: 0, NB: 0, qual: 0, bounds: null, slotX: null,
+      slotP: null, rowsY: null, runs: null, fracs: null, marks: 0 };
+    var i, j, k, x, y, t, t2, t3;
+
+    /* darkest channel: blue ballpoint ink that a fixed "black" test misses is still the darkest
+       channel, and paper of any brightness stays far above its own darkest channel */
+    var gray = new Uint8Array(w * h);
+    for (i = 0, j = 0; i < gray.length; i++, j += 4) {
+      t = px[j]; t2 = px[j + 1]; t3 = px[j + 2];
+      gray[i] = t < t2 ? (t < t3 ? t : t3) : (t2 < t3 ? t2 : t3);
+    }
+
+    /* the sheet is the bright thing in the frame: the desk, the floor and any deep shadow sit
+       far below the page's own brightness and carry no lattice, so they must not vote */
+    var samp = [];
+    for (i = 0; i < gray.length; i += 11) samp.push(gray[i]);
+    samp.sort(function (a2, b2) { return a2 - b2; });
+    var gRef = samp[(samp.length * 0.75) | 0] || 0;
+    var lmGate = gRef * 0.6;
+
+    /* integral image of the grey: the local paper brightness is O(1) at every pixel */
+    var iw = w + 1;
+    var ii = new Float64Array(iw * (h + 1));
+    for (y = 0; y < h; y++) {
+      var rowSum = 0, yb = y * w, ib = (y + 1) * iw, ibp = y * iw;
+      for (x = 0; x < w; x++) {
+        rowSum += gray[yb + x];
+        ii[ib + x + 1] = ii[ibp + x + 1] + rowSum;
+      }
+    }
+
+    /* ink = clearly darker than the paper around it, measured locally, so shadow, vignette and
+       exposure cancel out. Three tightness levels: the pen alone, the pen plus light marks, print */
+    var r0 = Math.max(6, Math.round(Math.min(w, h) * 0.0135));
+    info.r0 = r0;
+    var mT = new Uint8Array(w * h), mL = new Uint8Array(w * h), mM = new Uint8Array(w * h);
+    for (y = 0; y < h; y++) {
+      var y0 = y - r0 < 0 ? 0 : y - r0, y1 = y + r0 >= h ? h - 1 : y + r0;
+      var iy0 = y0 * iw, iy1 = (y1 + 1) * iw, hgt = y1 - y0 + 1, gb = y * w;
+      for (x = 0; x < w; x++) {
+        var x0 = x - r0 < 0 ? 0 : x - r0, x1 = x + r0 >= w ? w - 1 : x + r0;
+        var sum = ii[iy1 + x1 + 1] - ii[iy0 + x1 + 1] - ii[iy1 + x0] + ii[iy0 + x0];
+        var lm = sum / (hgt * (x1 - x0 + 1));
+        if (lm > lmGate) {
+          var v = gray[gb + x], gp = gb + x;
+          if (v < lm * 0.72) mT[gp] = 1;
+          if (v < lm * 0.80) mL[gp] = 1;
+          if (v < lm * 0.84) mM[gp] = 1;
+        }
+      }
+    }
+    gray = null;
+
+    /* the tilt: shear every pixel by y + a*(x - centre) — the shear that makes the printed lines
+       sharpest is the page's own frame, and a hand-held photo is never quite straight */
+    var pts = [];
+    for (y = 0; y < h; y++) {
+      var rb2 = y * w;
+      for (x = 0; x < w; x++) if (mM[rb2 + x]) pts.push(x, y);
+    }
+    if (pts.length < 800) return { answers: [], _dbg: dbg ? info : undefined };
+    function shearScore(a) {
+      var bins = new Int32Array(h + 200), xc = w * 0.5, q;
+      for (q = 0; q < pts.length; q += 2) bins[(pts[q + 1] + a * (pts[q] - xc) + 100) | 0]++;
+      var n = 0, s1 = 0, s2 = 0, bv;
+      for (q = 0; q < bins.length; q++) { bv = bins[q]; if (bv) { n += bv; s1 += bv; s2 += bv * bv; } }
+      return n ? s2 / n - (s1 / n) * (s1 / n) : 0;
+    }
+    var aBest = 0, scBest = -1, a, sc;
+    for (a = -0.09; a < 0.0901; a += 0.01) { sc = shearScore(a); if (sc > scBest) { scBest = sc; aBest = a; } }
+    for (a = aBest - 0.009; a < aBest + 0.0091; a += 0.002) { sc = shearScore(a); if (sc > scBest) { scBest = sc; aBest = a; } }
+    if (Math.abs(aBest) < 0.002) aBest = 0;
+    info.a = Math.round(aBest * 1000) / 1000;
+
+    /* everything below works in the straightened frame */
+    var off = Math.ceil(Math.abs(aBest) * w * 0.5) + 2;
+    var H = h + 2 * off;
+    info.off = off;
+    var xc2 = w * 0.5;
+    var sT = new Uint8Array(w * H), sL = new Uint8Array(w * H), sM = new Uint8Array(w * H);
+    for (y = 0; y < h; y++) {
+      var oy = y + off, src = y * w;
+      for (x = 0; x < w; x++) {
+        var yy = (oy + aBest * (x - xc2) + 0.5) | 0, dst = yy * w + x, si = src + x;
+        if (mT[si]) sT[dst] = 1;
+        if (mL[si]) sL[dst] = 1;
+        if (mM[si]) sM[dst] = 1;
+      }
+    }
+    mT = mL = mM = null;
+
+    function colProfile(mask) {
+      var pr = new Float32Array(H), cnt, base;
+      for (var yy2 = 0; yy2 < H; yy2++) {
+        cnt = 0; base = yy2 * w;
+        for (x = 0; x < w; x++) cnt += mask[base + x];
+        pr[yy2] = cnt;
+      }
+      return pr;
+    }
+    var profT = colProfile(sT);
+
+    /* the rows of ink: every filled bubble spikes the tight profile at its own row */
+    var maxT = 0;
+    for (y = 0; y < H; y++) if (profT[y] > maxT) maxT = profT[y];
+    if (maxT < 4) return { answers: [], _dbg: dbg ? info : undefined };
+    var thrP = Math.max(2, maxT * 0.15), cand = [];
+    for (y = 1; y < H - 1; y++) if (profT[y] >= profT[y - 1] && profT[y] > profT[y + 1] && profT[y] > thrP) cand.push(y);
+    var keep = [];
+    for (i = 0; i < cand.length; i++) {
+      var merged = false;
+      for (j = 0; j < keep.length; j++) {
+        if (Math.abs(cand[i] - keep[j]) < 8) { if (profT[cand[i]] > profT[keep[j]]) keep[j] = cand[i]; merged = true; break; }
+      }
+      if (!merged) keep.push(cand[i]);
+    }
+    if (keep.length < 4) return { answers: [], _dbg: dbg ? info : undefined };
+
+    /* the pitch is the spacing that keeps repeating — the printed rows; the instructions above
+       and the declaration below have no single spacing of their own */
+    var diffs = [];
+    for (i = 1; i < keep.length; i++) diffs.push(keep[i] - keep[i - 1]);
+    var Pd = 0, bestC = 0, d, c2;
+    for (d = 10; d <= 160; d++) {
+      c2 = 0;
+      for (i = 0; i < diffs.length; i++) if (Math.abs(diffs[i] - d) <= 2) c2++;
+      if (c2 > bestC) { bestC = c2; Pd = d; }
+    }
+    if (bestC < 4) return { answers: [], _dbg: dbg ? info : undefined };
+
+    /* the sheet's rows are the longest chain at that pitch; a blank row breaks the chain, so a
+       tie is settled in favour of the chain nearer the page's middle */
+    var runs = [], run = [keep[0]];
+    for (i = 1; i < keep.length; i++) {
+      if (keep[i] - keep[i - 1] <= 1.45 * Pd) run.push(keep[i]);
+      else { runs.push(run); run = [keep[i]]; }
+    }
+    runs.push(run);
+    var big = null;
+    for (i = 0; i < runs.length; i++) {
+      if (!big || runs[i].length > big.length ||
+          (runs[i].length === big.length &&
+           Math.abs(runs[i][0] + runs[i][runs[i].length - 1] - H) < Math.abs(big[0] + big[big.length - 1] - H)))
+        big = runs[i];
+    }
+    if (!big || big.length < 5) return { answers: [], _dbg: dbg ? info : undefined };
+    var d2 = [];
+    for (i = 1; i < big.length; i++) d2.push(big[i] - big[i - 1]);
+    var P = median(d2);
+    if (!P || P < 8) return { answers: [], _dbg: dbg ? info : undefined };
+    info.P = Math.round(P * 100) / 100;
+
+    /* rows must sit on the lattice: ink half a row off (a stamp, a smudge) is not a row, and a
+       row the student left blank is still a row — it is put back where it must be */
+    var rowsY = [big[0]];
+    for (i = 1; i < big.length; i++) {
+      var prev = rowsY[rowsY.length - 1], gapK = Math.round((big[i] - prev) / P);
+      if (gapK < 1) { if (profT[big[i]] > profT[prev]) rowsY[rowsY.length - 1] = big[i]; continue; }
+      if (Math.abs(big[i] - prev - gapK * P) > 0.32 * P) continue;
+      for (k = 1; k < gapK; k++) rowsY.push(prev + (big[i] - prev) * k / gapK);
+      rowsY.push(big[i]);
+    }
+    info.chain = rowsY.length;
+
+    if (rowsY.length < 5) return { answers: [], _dbg: dbg ? info : undefined };
+
+    /* the ink of one row: a filled bubble is a wide solid run — the student's mark */
+    var halfB = Math.max(6, Math.round(0.4 * P));
+    var runsPerRow = [];
+    for (i = 0; i < rowsY.length; i++) {
+      var ry0 = Math.max(0, Math.round(rowsY[i] - halfB)), ry1 = Math.min(H - 1, Math.round(rowsY[i] + halfB));
+      var fp = new Int32Array(w);
+      for (y = ry0; y <= ry1; y++) { var b3 = y * w; for (x = 0; x < w; x++) if (sT[b3 + x]) fp[x]++; }
+      var fthr = Math.max(3, Math.round(0.30 * (ry1 - ry0 + 1)));
+      var rr = [], start = -1, sumc = 0, sumx = 0;
+      for (x = 0; x <= w; x++) {
+        if (x < w && fp[x] > fthr) {
+          if (start < 0) { start = x; sumc = 0; sumx = 0; }
+          sumc += fp[x]; sumx += fp[x] * x;
+        } else if (start >= 0) {
+          var wd = x - start;
+          if (wd >= Math.max(3, 0.2 * P) && wd <= 2 * P && sumc >= 3 * fthr) rr.push({ x: sumx / sumc, w: sumc });
+          start = -1;
+        }
+      }
+      runsPerRow.push(rr);
+    }
+    info.runs = runsPerRow.map(function (rr) { return rr.length; });
+
+    /* how many blocks of questions sit side by side: the run count most rows agree on */
+    var cntHist = {}, NB = 0, nbBest = 0;
+    for (i = 0; i < runsPerRow.length; i++) {
+      var nc = runsPerRow[i].length;
+      if (nc < 1 || nc > 12) continue;
+      cntHist[nc] = (cntHist[nc] || 0) + 1;
+    }
+    Object.keys(cntHist).forEach(function (kk2) {
+      var nc2 = +kk2, cc = cntHist[kk2];
+      if (cc > nbBest || (cc === nbBest && nc2 > NB)) { nbBest = cc; NB = nc2; }
+    });
+    info.NB = NB;
+    if (NB < 1 || nbBest < 3) return { answers: [], _dbg: dbg ? info : undefined };
+
+    /* the paper fixes the layout: qCount questions over NB side-by-side blocks means qCount/NB
+       rows in every block. The chain can pick up the frame's closing line below the last row
+       (printed ink at every column), and one extra row there shifts the numbering of every
+       following block by one — so an over-long chain loses the end whose rows do not carry one
+       mark per block. Only a small excess is trimmed: a wildly different count means the
+       caller's qCount does not describe this sheet, and guessing would shift rows instead */
+    var rpb = 0;
+    if (qCount > 0 && qCount % NB === 0) {
+      var rq = qCount / NB;
+      if (rq >= 5 && rq <= 80) rpb = rq;
+    }
+    info.rpb = rpb;
+    if (rpb && rowsY.length > rpb && rowsY.length - rpb <= Math.max(4, Math.round(0.3 * rpb))) {
+      var endRuns = function (from) {
+        var s8 = 0;
+        for (var q8 = from; q8 < from + 3 && q8 < runsPerRow.length; q8++)
+          if (runsPerRow[q8].length === NB) s8++;
+        return s8;
+      };
+      while (rowsY.length > rpb) {
+        if (endRuns(rowsY.length - 3) >= endRuns(0)) { rowsY.pop(); runsPerRow.pop(); }
+        else { rowsY.shift(); runsPerRow.shift(); }
+      }
+      info.trimmed = 1;
+    }
+
+    /* a row showing exactly one mark per block hands over each block's marks directly — the
+       blocks sit left to right, and the question numbering runs down one block at a time */
+    var fillsPerBlock = [], qual = 0;
+    for (i = 0; i < NB; i++) fillsPerBlock.push([]);
+    for (i = 0; i < runsPerRow.length; i++) {
+      var r2 = runsPerRow[i];
+      if (r2.length !== NB) continue;
+      qual++;
+      for (j = 0; j < NB; j++) fillsPerBlock[j].push({ x: r2[j].x, w: r2[j].w, y: rowsY[i] });
+    }
+    info.qual = qual;
+    if (qual < 2) return { answers: [], _dbg: dbg ? info : undefined };
+
+    /* columns per option: every bubble carries its printed ring and letter whether or not anyone
+       filled it, so the printed ink is the reliable comb target — pen ink alone cannot tell
+       option A from option B when one of the two was never filled on the whole sheet. The pen
+       strokes are erased from the profile before it is used: a comb shifted onto a column of fat
+       marks, or onto the printed question numbers beside the block, would otherwise collect as
+       much ink as the true letter columns */
+    var yA = Math.max(0, Math.round(rowsY[0] - 0.6 * P)), yB = Math.min(H - 1, Math.round(rowsY[rowsY.length - 1] + 0.6 * P));
+    var colM = new Float32Array(w);
+    for (y = yA; y <= yB; y++) { var b5 = y * w; for (x = 0; x < w; x++) colM[x] += sM[b5 + x]; }
+    for (i = 0; i < NB; i++) for (j = 0; j < fillsPerBlock[i].length; j++) {
+      var fk = fillsPerBlock[i][j];
+      var my0 = Math.max(yA, Math.round(fk.y - 0.5 * P)), my1 = Math.min(yB, Math.round(fk.y + 0.5 * P));
+      var mx0 = Math.max(0, Math.round(fk.x - 0.42 * P)), mx1 = Math.min(w - 1, Math.round(fk.x + 0.42 * P));
+      for (y = my0; y <= my1; y++) { var bF = y * w; for (x = mx0; x <= mx1; x++) colM[x] -= sM[bF + x]; }
+    }
+    info.colM = colM;
+    function printAt(cx3, pw) {
+      var px0 = Math.max(0, Math.round(cx3 - 0.18 * pw)), px1 = Math.min(w - 1, Math.round(cx3 + 0.18 * pw));
+      var s3 = 0;
+      for (var q = px0; q <= px1; q++) s3 += colM[q];
+      return s3;
+    }
+    var colSm = new Float32Array(w);
+    for (x = 0; x < w; x++) {
+      var s6 = 0, n6 = 0;
+      for (var q7 = Math.max(0, x - 3); q7 <= Math.min(w - 1, x + 3); q7++) { s6 += colM[q7]; n6++; }
+      colSm[x] = s6 / n6;
+    }
+    var colTop = [], colTopV = [], mxC = 0;
+    for (x = 0; x < w; x++) if (colSm[x] > mxC) mxC = colSm[x];
+    info.colMmx = Math.round(mxC);
+    if (mxC > 0) {
+      var lastP = -10;
+      for (x = 2; x < w - 2; x++) {
+        if (colSm[x] > colSm[x - 1] && colSm[x] >= colSm[x + 1] && colSm[x] > 0.4 * mxC) {
+          if (x - lastP < 6) {
+            if (colTop.length && colSm[x] > colTopV[colTopV.length - 1]) {
+              colTop.pop(); colTopV.pop(); colTop.push(x); colTopV.push(colSm[x]); lastP = x;
+            }
+            continue;
+          }
+          colTop.push(x); colTopV.push(colSm[x]); lastP = x;
+        }
+      }
+    }
+    info.colTop = colTop;
+    info.colTopV = colTopV.map(function (v9) { return Math.round(v9 * 100 / (mxC || 1)); });
+    /* second opinion: the loose mask sees printed rings the mid mask missed in bright spots */
+    var colL = new Float32Array(w);
+    for (y = yA; y <= yB; y++) { var b8 = y * w; for (x = 0; x < w; x++) colL[x] += sL[b8 + x]; }
+    var mxL2 = 0;
+    for (x = 0; x < w; x++) if (colL[x] > mxL2) mxL2 = colL[x];
+    info.pkL = [];
+    if (mxL2 > 0) {
+      var smL = new Float32Array(w), lastL = -10;
+      for (x = 0; x < w; x++) {
+        var s9 = 0, n9 = 0;
+        for (var q9 = Math.max(0, x - 3); q9 <= Math.min(w - 1, x + 3); q9++) { s9 += colL[q9]; n9++; }
+        smL[x] = s9 / n9;
+      }
+      for (x = 2; x < w - 2; x++) {
+        if (smL[x] > smL[x - 1] && smL[x] >= smL[x + 1] && smL[x] > 0.3 * mxL2 && x - lastL >= 6) {
+          info.pkL.push(x + ':' + Math.round(smL[x] * 100 / mxL2));
+          lastL = x;
+        }
+      }
+    }
+    var slotAll = [], slotScore = [];
+    info.blockN = []; info.minX = []; info.maxX = []; info.fitA = []; info.fitP = []; info.fitPr = []; info.fitEx = []; info.fitUn = [];
+    for (i = 0; i < NB; i++) {
+      var bp = fillsPerBlock[i], minX = Infinity, maxX = -Infinity;
+      for (j = 0; j < bp.length; j++) { if (bp[j].x < minX) minX = bp[j].x; if (bp[j].x > maxX) maxX = bp[j].x; }
+      info.blockN.push(bp.length); info.minX.push(Math.round(minX)); info.maxX.push(Math.round(maxX));
+      var anchorLo = minX - 0.9 * P, anchorHi = minX + 1.2 * P;
+      var lastLo = maxX - 1.2 * P, lastHi = maxX + 0.9 * P;
+      var fit = null, bestAny = null;
+      /* the comb must cover the block's own marks: the leftmost option column sits within about
+         a pitch of the block's leftmost fill and the rightmost within a pitch of its rightmost —
+         a comb shifted off the block used to pass by collecting the neighbouring block's printed
+         ink and stamps. Among the combs that do cover the block, the printed columns decide: they
+         are pure print now that the pen strokes were erased from the profile, and the ink window
+         is tied to the sheet's row pitch P, not to the candidate's own pitch, so a stretched comb
+         cannot widen its own window onto the ink. A hand-drawn mark may wander halfway to the
+         next bubble (the tight mask catches only the stroke's core), so a quarter of the fills may
+         sit unexplained without disqualifying the comb. */
+      var unCap = Math.max(2, Math.round(0.25 * bp.length));
+      for (var pt2 = 0.72 * P; pt2 <= 1.45 * P + 0.01; pt2 += 0.04 * P) {
+        var exTol = Math.min(0.5 * pt2, 0.55 * P);
+        for (var at = anchorLo; at <= anchorHi; at += 1.5) {
+          var last = at + (optCount - 1) * pt2;
+          if (last < lastLo || last > lastHi) continue;
+          var fs = 0;
+          for (k = 0; k < optCount; k++) fs += printAt(at + k * pt2, P);
+          var ex = 0;
+          for (j = 0; j < bp.length; j++) {
+            var dmn = Infinity;
+            for (k = 0; k < optCount; k++) { var dd4 = Math.abs(bp[j].x - (at + k * pt2)); if (dd4 < dmn) dmn = dd4; }
+            if (dmn <= exTol) ex++;
+          }
+          var cand = { s: fs, A: at, p: pt2, pr: fs, ex: ex, un: bp.length - ex };
+          if (!bestAny || fs > bestAny.s) bestAny = cand;
+          if (cand.un <= unCap && (!fit || fs > fit.s)) fit = cand;
+        }
+      }
+      if (!fit) fit = bestAny;
+      info.fitA.push(fit ? Math.round(fit.A) : null); info.fitP.push(fit ? Math.round(fit.p * 10) / 10 : null);
+      info.fitPr.push(fit ? Math.round(fit.pr) : null); info.fitEx.push(fit ? fit.ex : null); info.fitUn.push(fit ? fit.un : null);
+      if (!fit || fit.s <= 0) { slotAll.push(null); slotScore.push(0); continue; }
+      var sl = [];
+      for (k = 0; k < optCount; k++) {
+        var ap = fit.A + k * fit.p, sw = 0, sx = 0;
+        for (j = 0; j < bp.length; j++) {
+          var dd3 = Math.abs(bp[j].x - ap);
+          if (dd3 < 0.45 * fit.p) { sw += bp[j].w; sx += bp[j].x * bp[j].w; }
+        }
+        var rf = sw ? sx / sw : ap;
+        if (Math.abs(rf - ap) > 0.3 * fit.p) rf = ap;
+        sl.push(rf);
+      }
+      slotAll.push({ x: sl, p: fit.p, A: fit.A });
+      slotScore.push(fit.s);
+    }
+    info.cls = []; info.fills = [];
+    for (i = 0; i < NB; i++) {
+      var fx = fillsPerBlock[i].slice().sort(function (a2, b2) { return a2.x - b2.x; });
+      var cl = [];
+      for (j = 0; j < fx.length; j++) {
+        if (cl.length && fx[j].x - cl[cl.length - 1].hix <= 14) { var c3 = cl[cl.length - 1]; c3.s += fx[j].x; c3.n++; c3.hix = fx[j].x; }
+        else cl.push({ s: fx[j].x, n: 1, hix: fx[j].x });
+      }
+      info.cls.push(cl.map(function (c4) { return Math.round(c4.s / c4.n) + 'x' + c4.n; }));
+      info.fills.push(fillsPerBlock[i].map(function (o) { return Math.round(o.y) + ':' + Math.round(o.x); }));
+    }
+
+    /* the fitted combs must agree with the sheet itself: the blocks repeat at an even distance,
+       and no unfitted block may sit just outside either end (that would mean the run rows
+       carried one block too few and every answer is numbered from the wrong block) */
+    var okFit = true;
+    for (i = 0; i < NB && okFit; i++) if (!slotAll[i]) okFit = false;
+    if (okFit && NB > 1) {
+      var A0 = [], gaps = [];
+      for (i = 0; i < NB; i++) A0.push(slotAll[i].A);
+      for (i = 1; i < NB; i++) gaps.push(A0[i] - A0[i - 1]);
+      var gMed = median(gaps);
+      if (!gMed || gMed < 1.5 * P) okFit = false;
+      for (i = 0; i < gaps.length && okFit; i++)
+        if (Math.abs(gaps[i] - gMed) > 0.45 * gMed) okFit = false;
+      info.gaps = gaps.map(function (vv) { return Math.round(vv); });
+      if (okFit) {
+        var pl = A0[0] - gaps[0], pr = A0[NB - 1] + gaps[gaps.length - 1];
+        if (printAt(pl, 0.6 * slotAll[0].p) > 0.5 * printAt(A0[0], 0.6 * slotAll[0].p)) okFit = false;
+        if (printAt(pr, 0.6 * slotAll[NB - 1].p) > 0.5 * printAt(A0[NB - 1], 0.6 * slotAll[NB - 1].p)) okFit = false;
+      }
+    } else if (okFit) {
+      info.gaps = [];
+    }
+    if (!okFit) return { answers: [], _dbg: dbg ? info : undefined };
+    info.slotX = slotAll.map(function (s4) { return s4 ? s4.x.map(function (vv) { return Math.round(vv); }) : null; });
+    info.slotP = slotAll.map(function (s4) { return s4 ? Math.round(s4.p * 10) / 10 : null; });
+
+    /* every answer row carries printed letters and rings at all comb columns, filled or blank —
+       so a row is added above or below only while the printed ink is there on ALL of them; the
+       booklet header and the declaration below do not have it, so the lattice stops at Q30 */
+    var chk = [];
+    for (i = 0; i < NB; i++) for (k = 0; k < optCount; k++) chk.push({ x: slotAll[i].x[k], p: slotAll[i].p });
+    function rowPrint(cy5, cx5, pw5) {
+      var ry3 = Math.max(0, Math.round(cy5 - 0.35 * pw5)), ry4 = Math.min(H - 1, Math.round(cy5 + 0.35 * pw5));
+      var px3 = Math.max(0, Math.round(cx5 - 0.18 * pw5)), px4 = Math.min(w - 1, Math.round(cx5 + 0.18 * pw5));
+      var s5 = 0;
+      for (var q5 = ry3; q5 <= ry4; q5++) { var b6 = q5 * w; for (var x5 = px3; x5 <= px4; x5++) s5 += sM[b6 + x5]; }
+      return s5;
+    }
+    function rowIsAnswer(cy6) {
+      var vs = [], mn = Infinity;
+      for (var q6 = 0; q6 < chk.length; q6++) {
+        var v6 = rowPrint(cy6, chk[q6].x, chk[q6].p);
+        vs.push(v6); if (v6 < mn) mn = v6;
+      }
+      var md = median(vs);
+      return md >= 2 && mn >= 0.35 * md;
+    }
+    for (t = 0; t < 40; t++) { if (rpb && rowsY.length >= rpb) break; var cu = rowsY[0] - P; if (!rowIsAnswer(cu)) break; rowsY.unshift(cu); }
+    for (t = 0; t < 40; t++) { if (rpb && rowsY.length >= rpb) break; var cd = rowsY[rowsY.length - 1] + P; if (!rowIsAnswer(cd)) break; rowsY.push(cd); }
+    /* the known layout overrides: a row the chain could not see is still a row of the sheet */
+    while (rpb && rowsY.length < rpb) rowsY.push(rowsY[rowsY.length - 1] + P);
+    while (rpb && rowsY.length > rpb) rowsY.pop();
+    info.rows = rowsY.length;
+    info.rowsY = rowsY.map(function (vv) { return Math.round(vv); });
+
+    /* the reading itself: a filled bubble is a solid disk of ink; an empty one is only a printed
+       ring with an open middle, so a disk test separates the two by a wide margin */
+    function diskOffsets(rad) {
+      var list = [], lim = Math.ceil(rad), xx, yy4;
+      for (yy4 = -lim; yy4 <= lim; yy4++)
+        for (xx = -lim; xx <= lim; xx++) if (xx * xx + yy4 * yy4 <= rad * rad) list.push(xx, yy4);
+      return list;
+    }
+    function diskFrac(mask, cx3, cy3, offs) {
+      var n = 0, hit = 0, bx = Math.round(cx3), by = Math.round(cy3);
+      for (var q = 0; q < offs.length; q += 2) {
+        var xx2 = bx + offs[q], yy5 = by + offs[q + 1];
+        if (xx2 < 0 || xx2 >= w || yy5 < 0 || yy5 >= H) continue;
+        n++;
+        if (mask[yy5 * w + xx2]) hit++;
+      }
+      return n ? hit / n : 0;
+    }
+    var answers = [], fr1 = [], fr2 = [];
+    for (i = 0; i < NB; i++) {
+      var sl2 = slotAll[i], rad = sl2 ? Math.max(4, 0.32 * sl2.p) : 0;
+      var offs = sl2 ? diskOffsets(rad) : null;
+      for (var ri = 0; ri < rowsY.length; ri++) {
+        if (!sl2) { fr1.push(0); fr2.push(0); continue; }
+        var best1 = 0, best2 = 0, o1 = -1, o2 = -1;
+        for (k = 0; k < optCount; k++) {
+          var f1 = 0, f2 = 0;
+          for (var dxo = -0.3; dxo <= 0.301; dxo += 0.15) {
+            for (var dyo = -0.15; dyo <= 0.151; dyo += 0.15) {
+              var cx4 = sl2.x[k] + dxo * sl2.p, cy4 = rowsY[ri] + dyo * sl2.p;
+              var tv = diskFrac(sT, cx4, cy4, offs);
+              if (tv > f1) f1 = tv;
+              tv = diskFrac(sL, cx4, cy4, offs);
+              if (tv > f2) f2 = tv;
+            }
+          }
+          if (f1 > best1) { best1 = f1; o1 = k; }
+          if (f2 > best2) { best2 = f2; o2 = k; }
+        }
+        fr1.push(Math.round(best1 * 100) / 100);
+        fr2.push(Math.round(best2 * 100) / 100);
+        var opt = best1 >= 0.4 ? o1 : (best2 >= 0.75 ? o2 : -1);
+        if (opt >= 0) answers.push({ no: i * rowsY.length + ri + 1, answer: String.fromCharCode(65 + opt) });
+      }
+    }
+    info.fracs = { f1: fr1, f2: fr2 };
+    info.marks = answers.length;
+    return { answers: answers, _dbg: dbg ? info : undefined };
+  }
+
   /* 1-D clustering: sorted values merge into one cluster while each stays within gapAbs of the
      previous value; returns cluster means. */
   function clusterAxis(vals, gapAbs) {
@@ -492,22 +1251,34 @@
     return n ? hit / n : 0;
   }
 
-  /* Browser entry: decode the photo, analyse, return [{no, answer}] best-effort marks. */
+  /* Browser entry: decode the photo, analyse, return [{no, answer}] best-effort marks.
+     Flat scans go through the printed-disk finder; a phone photo whose disks it can't
+     lock onto is re-scanned at a larger size with the row-lattice reader. */
   function readOmrSheet(file, opts) {
     opts = opts || {};
     return loadBitmap(file).then(function (bmp) {
       var w = bmp.width || bmp.naturalWidth, h = bmp.height || bmp.naturalHeight;
-      var s = Math.min(1, 1600 / Math.max(w, h));
-      var c = document.createElement('canvas');
-      c.width = Math.max(1, Math.round(w * s));
-      c.height = Math.max(1, Math.round(h * s));
-      var ctx = c.getContext('2d', { willReadFrequently: true });
-      ctx.drawImage(bmp, 0, 0, c.width, c.height);
+      function canvasAt(scale) {
+        var c = document.createElement('canvas');
+        c.width = Math.max(1, Math.round(w * scale));
+        c.height = Math.max(1, Math.round(h * scale));
+        var ctx = c.getContext('2d', { willReadFrequently: true });
+        ctx.drawImage(bmp, 0, 0, c.width, c.height);
+        return { c: c, img: ctx.getImageData(0, 0, c.width, c.height) };
+      }
+      var big = canvasAt(Math.min(1, 1600 / Math.max(w, h)));
+      var found = omrFindDisks(big.img.data, big.c.width, big.c.height, opts.optCount || 4);
+      if (opts.onProgress) opts.onProgress(0.4);
+      var lat = { answers: [] };
+      if (found.answers.length < 8) {
+        var full = canvasAt(Math.min(2.4, 2560 / Math.max(w, h)));
+        try {
+          lat = omrLatticeScan(full.img.data, full.c.width, full.c.height, opts.optCount || 4, false, opts.qCount || 0);
+        } catch (e) { lat = { answers: [] }; }
+      }
       if (bmp.close) bmp.close();
-      var img = ctx.getImageData(0, 0, c.width, c.height);
-      var found = omrFindDisks(img.data, c.width, c.height, opts.optCount || 4);
       if (opts.onProgress) opts.onProgress(1);
-      return found.answers;
+      return lat.answers.length > found.answers.length ? lat.answers : found.answers;
     });
   }
 
@@ -922,6 +1693,20 @@
     var jpegs = jpegPagesFromPdf(opts.buf, opts.pageCount || 0);
     if (jpegs) {
       var maxEdge = opts.ocrEdge || (jpegs.length > 30 ? 1200 : 1600);
+      if (opts.columns) {
+        /* each page goes back as the two columns one under the other, so every line inside the
+           result carries a single script and its own question number */
+        return runOcrJobs(jpegs.length, opts, function (pn) {
+          return pageColumnsFromSlice(jpegs[pn - 1], maxEdge, opts.enhance)
+            .then(function (crops) {
+              if (crops) return crops;
+              return jpegToOcrSource(jpegs[pn - 1], maxEdge, opts.enhance, function (pg) {
+                pg.no = pn;
+                if (opts.onPage) opts.onPage(pg);
+              });
+            });
+        });
+      }
       return runOcrJobs(jpegs.length, opts, function (pn) {
         return jpegToOcrSource(jpegs[pn - 1], maxEdge, opts.enhance, function (pg) {
           pg.no = pn;
@@ -930,6 +1715,12 @@
       });
     }
     return renderPdfPagesToOcr(file, opts);
+  }
+
+  function pageColumnsFromSlice(slice, edge, enhance) {
+    return loadBitmap(new Blob([slice], { type: 'image/jpeg' })).then(function (bmp) {
+      return columnPair(bmp, Math.max(edge, 1500), enhance);
+    }, function () { return null; });
   }
 
   /* Fallback for PDFs that keep their scans in an exotic codec: render through pdf.js. */
@@ -960,6 +1751,14 @@
     var last = n, i, jobs = [];
     if (opts.maxPages && last > opts.maxPages) last = opts.maxPages;
     for (i = 1; i <= last; i++) jobs.push(i);
+    /* a column scan costs minutes per page, so the caller can hand a per-page figure: the flat
+       budget then becomes a floor that grows with the page count, up to a hard cap */
+    var deadline = opts.deadline || 0;
+    if (opts.perPageMs && last) {
+      var need = Date.now() + Math.ceil(last * opts.perPageMs / OCR_POOL_SIZE);
+      if (need > deadline) deadline = need;
+    }
+    if (opts.hardDeadline && deadline > opts.hardDeadline) deadline = opts.hardDeadline;
     var got = {}, done = 0, settled = false, timer = null;
     function report(pr) {
       if (opts.onProgress) opts.onProgress(Math.min(0.99, (done + (pr || 0)) / jobs.length));
@@ -976,8 +1775,21 @@
         resolve(tidyLines(out.join('\n')));
       }
       mapLimit(jobs, OCR_POOL_SIZE, function (pn) {
-        if (opts.deadline && Date.now() > opts.deadline) return '';
+        if (deadline && Date.now() > deadline) return '';
         return Promise.resolve(srcFn(pn)).then(function (src) {
+          /* a page may hand back its two columns, which are read and bound row-by-row */
+          if (src && src.length != null && typeof src !== 'string') {
+            if (src.length === 2) return ocrColumnPair(src[0], src[1], opts.lang, report);
+            /* serial, for the same reason as ocrColumnPair: never hold one slot while asking for another */
+            var parts = [];
+            var chain = Promise.resolve();
+            [].forEach.call(src, function (s) {
+              chain = chain.then(function () {
+                return ocrImageSource(s, opts.lang, report).then(function (t) { parts.push(t); });
+              });
+            });
+            return chain.then(function () { return parts.join('\n'); });
+          }
           return ocrImageSource(src, opts.lang, report);
         }).then(function (txt) {
           got[pn] = txt;
@@ -985,7 +1797,7 @@
           report(0);
         }, function () { got[pn] = ''; done++; report(0); });
       }).then(finish, finish);
-      if (opts.deadline) timer = setTimeout(finish, Math.max(1500, opts.deadline - Date.now()));
+      if (deadline) timer = setTimeout(finish, Math.max(1500, deadline - Date.now()));
     });
   }
 
@@ -1032,6 +1844,18 @@
       return extractFromPdf(file, opts);
     }
     if (/^image\//.test(file.type) || /\.(png|jpe?g|webp|bmp|gif|tif?f)$/.test(name)) {
+      /* a phone photo of a bilingual page is the same two-column problem, one page at a time */
+      if (opts.columns) {
+        return loadBitmap(file).then(function (bmp) {
+          return pageColumns(bmp, opts.ocrEdge || 1600, true);
+        }).then(function (layout) {
+          var src = layout.crops || [layout.url];
+          if (src.length === 2) return ocrColumnPair(src[0], src[1], opts.lang, opts.onProgress);
+          return Promise.all(src.map(function (s) {
+            return ocrImageSource(s, opts.lang, opts.onProgress);
+          })).then(function (t) { return tidyLines(t.join('\n')); });
+        });
+      }
       /* a phone photo gets the same cleanup as a scanned page before the model sees it */
       if (opts.enhance) {
         return loadBitmap(file).then(function (bmp) {
@@ -1052,6 +1876,54 @@
     });
   }
 
+  /* One page says two things about a scan before the whole file is spent on the wrong reading:
+     whether it carries Hindi at all (an English-only model cannot even see Devanagari), and whether
+     its text sits in two columns. Neither can be inferred from a photo — there is no text layer. */
+  function probePaper(file) {
+    return pageOneBitmap(file).then(function (bmp) {
+      return pageColumns(bmp, 1600, true);
+    }).then(function (layout) {
+      var src = layout.crops || [layout.url];
+      return Promise.all(src.map(function (s) { return ocrImageSource(s, 'eng+hin'); }))
+        .then(function (texts) {
+          var dev = 0, lat = 0;
+          texts.forEach(function (t) { dev += devCount(t); lat += latCount(t); });
+          return { hindi: dev >= 8, columns: !!layout.crops, gutter: layout.gutter || 0, text: texts.join('\n') };
+        });
+    }, function () { return { hindi: false, columns: false, gutter: 0, text: '' }; });
+  }
+
+  /* the first page as a bitmap: a scanner PDF's own JPEG is read straight out of the file, so the
+     probe never waits on pdf.js decoding */
+  function pageOneBitmap(file) {
+    var isPdf = /\.pdf$/.test((file.name || '').toLowerCase()) || file.type === 'application/pdf';
+    if (!isPdf) return loadBitmap(file);
+    return file.arrayBuffer().then(function (buf) {
+      var jpegs = jpegPagesFromPdf(buf, 0);
+      if (jpegs && jpegs.length) return loadBitmap(new Blob([jpegs[0]], { type: 'image/jpeg' }));
+      return loadScript(PDFJS_CDN, 'pdfjs').then(function () {
+        global.pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER;
+        return global.pdfjsLib.getDocument({ data: buf.slice ? buf.slice(0) : buf }).promise;
+      }).then(function (doc) {
+        return doc.getPage(1).then(function (p) {
+          var vp0 = p.getViewport({ scale: 1 });
+          return renderPageToDataURL(doc, 1, 1600 / Math.max(vp0.width, vp0.height), {})
+            .then(function (url) { return loadBitmap(dataUrlBlob(url)); });
+        });
+      });
+    });
+  }
+
+  function dataUrlBlob(url) {
+    var b = atob(url.slice(url.indexOf(',') + 1)), u = new Uint8Array(b.length), i;
+    for (i = 0; i < b.length; i++) u[i] = b.charCodeAt(i);
+    return new Blob([u], { type: 'image/jpeg' });
+  }
+
+  function probeHindi(file) {
+    return probePaper(file).then(function (r) { return r.hindi; });
+  }
+
   function tidyLines(text) {
     return String(text || '')
       .replace(/\r/g, '')
@@ -1066,6 +1938,70 @@
   }
 
   /* ---------- 2. Question paper parser ---------- */
+
+  var DEV_RE = /[\u0900-\u097F]/, LAT_RE = /[A-Za-z]/;
+  function devCount(s) { var n = 0, i; for (i = 0; i < s.length; i++) if (DEV_RE.test(s[i])) n++; return n; }
+  function latCount(s) { var n = 0, i; for (i = 0; i < s.length; i++) if (LAT_RE.test(s[i])) n++; return n; }
+
+  /* A bilingual paper prints the Hindi and the English copy side by side, so a page OCR reads one
+     band at a time and every line comes back as "Hindi column + English column" glued together:
+     "12. नीचे दो कथन … 12. Given below are two statements". Neither copy then reads as a whole, so
+     hardly any question parses and nothing matches. Cut such a line at the one word boundary that
+     misplaces the fewest letters of either script, and put the two columns back as two consecutive
+     blocks — the shape a bilingual PDF's own text layer already has.
+     The cut is only taken when both halves are real sentences: a Hindi line that merely carries
+     "(A)" markers or roman numerals must stay in one piece. */
+  function cutLine(line) {
+    var dv = devCount(line), lt = latCount(line);
+    if (!dv && !lt) return null;
+    if (!dv) return 'en';
+    if (!lt) return 'hi';
+    var i, devL = 0, latL = 0, best = null, bestCost = 1e9;
+    for (i = 0; i <= line.length; i++) {
+      if (i > 0) { if (DEV_RE.test(line[i - 1])) devL++; else if (LAT_RE.test(line[i - 1])) latL++; }
+      /* cut between words only: a column boundary is always a space, never inside a word */
+      if (i > 0 && i < line.length && line[i - 1] !== ' ' && line[i] !== ' ') continue;
+      var left = line.slice(0, i), right = line.slice(i);
+      if (!right.trim() || !left.trim()) continue;
+      var cost = latL + (dv - devL);
+      /* a bare number at the end of the left half belongs to the column on the right */
+      if (/[0-9०-९]\s*[).:॰]?\s*$/.test(left)) cost += 2;
+      if (cost < bestCost) { bestCost = cost; best = [left, right]; }
+    }
+    if (!best || bestCost > 3) return dv > lt ? 'hi' : 'en';
+    if (devCount(best[0]) < 6 || latCount(best[1]) < 6) return dv > lt ? 'hi' : 'en';
+    return best;
+  }
+
+  /* OCR splits Devanagari clusters at the halant ("ब् लॉक" for ब्लॉक) and between a हु-verb and its
+     final vowel ("हु ए" for हुए), which makes every second Hindi word unreadable. A Hindi word never
+     ends in a bare halant, and "हु" alone is never a word, so re-joining both splits is safe. */
+  var HALANT_SPLIT = /([\u0915-\u0939]\u094D)\s+([\u0915-\u0939])/g;
+  var HU_SPLIT = /(^|[^\u0900-\u097F])(हु)\s+(ए|आ|ई)(?![\u0915-\u0939\u093E-\u094D])/g;
+  function joinDevaWords(text) {
+    var t = String(text || '');
+    if (t.indexOf('\u094D') < 0 && t.indexOf('हु') < 0) return t;
+    for (var prev = ''; prev !== t;) { prev = t; t = t.replace(HALANT_SPLIT, '$1$2'); }
+    return t.replace(HU_SPLIT, '$1$2$3');
+  }
+
+  function splitScripts(text) { return joinDevaWords(splitScriptsCore(text)); }
+
+  function splitScriptsCore(text) {
+    var lines = String(text || '').split('\n'), hi = [], en = [], mixed = 0, i, last = '';
+    for (i = 0; i < lines.length; i++) {
+      var l = lines[i];
+      if (!l.trim()) continue;
+      var r = cutLine(l);
+      if (r === 'hi' || r === 'en') { (r === 'hi' ? hi : en).push(l); last = r; continue; }
+      if (!r) { (last === 'hi' ? hi : en).push(l); continue; }
+      hi.push(r[0].trim()); en.push(r[1].trim()); mixed++;
+    }
+    /* a handful of mixed lines is OCR noise inside an otherwise single-script document, not a
+       two-column scan — reordering that would only scramble it */
+    if (mixed < 8) return text;
+    return hi.join('\n') + '\n' + en.join('\n');
+  }
 
   var OPT_PAIR = /\(\s*\d{1,3}\s*\)|\b\d{1,3}\s*[)]/g;
   var Q_START = /^\s*(?:Q(?:uestion)?[\s.:#-]*)?(\d{1,3})\s*[).:\-॰°]\s*(.*)$/i;
@@ -1120,6 +2056,10 @@
     return (hi + ' ' + en).replace(/\s+/g, ' ');
   }
 
+  /* "Consider the following statements :" introduces numbered items (1. … 2. …) that read exactly
+     like question starts. The stem keeps this marker so those items stay part of the stem. */
+  var STMT_INTRO = /(?:statements?|कथन|वाक्य|अभिकथन)\s*[:：]?\s*$|(?:statements?|कथन|वाक्य|अभिकथन)[^.!?।]{0,30}[:：]\s*$/i;
+
   function parseQuestions(text) {
     var lines = tidyLines(text).split('\n');
     var out = [], cur = null, expected = 1, i;
@@ -1147,14 +2087,22 @@
       var m = line.match(HINDI_Q) || line.match(Q_START);
       var num = m ? parseInt(m[1], 10) : null;
       var restLen = m ? m[2].replace(/\s/g, '').length : 0;
-      /* A numbered line carrying real words is a question — even when OCR skipped numbers
-         or the paper restarts its numbering in a second section. */
-      var isStart = num !== null && num > 0 && num <= 999 && !looksLikeOptionsLine(line) &&
-        (restLen >= 12 || (restLen >= 2 && Math.abs(num - expected) <= 12));
+      /* A numbered line carrying real words is a question — but a number that jumps backwards is
+         only a fresh start when the paper really restarts its numbering (a '1' after a long run,
+         not right after a stem that opens with ':'), or when it repeats the number just read
+         (the second-language copy of the same question). "1. …" inside a statements stem is not. */
+      var below = num !== null && num < expected;
+      var dupCopy = cur && num === cur.no;
+      var restart = num === 1 && expected > 20 && !(cur && (cur.stmt || /[:：]\s*$/.test(cur.text || '')));
+      var innerItem = cur && cur.stmt && below && !dupCopy;
+      var isStart = !innerItem && num !== null && num > 0 && num <= 999 && !looksLikeOptionsLine(line) &&
+        (restLen >= 12 || (restLen >= 2 && Math.abs(num - expected) <= 12)) &&
+        (!below || dupCopy || restart);
 
       if (isStart) {
         push();
         cur = { no: num, text: m[2].trim(), options: [], raw: line };
+        if (STMT_INTRO.test(cur.text.slice(-90))) cur.stmt = true;
         expected = num + 1;
         continue;
       }
@@ -1174,6 +2122,7 @@
         cur.options.push(line);
       } else if (cur.text.length < 1200) {
         cur.text = (cur.text + ' ' + line).trim();
+        if (!cur.stmt && STMT_INTRO.test(cur.text.slice(-90))) cur.stmt = true;
       } else {
         cur.options.push(line);
       }
@@ -1829,6 +2778,19 @@
     extractText: extractText,
     prewarm: prewarm,
     parseQuestions: parseQuestions,
+    splitScripts: splitScripts,
+    joinDevaWords: joinDevaWords,
+    zipColumns: zipColumns,
+    splitBlocks: splitBlocks,
+    pairLinesByY: pairLinesByY,
+    ocrColumnPair: ocrColumnPair,
+    ocrLines: ocrLines,
+    probeHindi: probeHindi,
+    probePaper: probePaper,
+    pageColumns: pageColumns,
+    gutterX: gutterX,
+    latCount: latCount,
+    devCount: devCount,
     parseAnswerKey: parseAnswerKey,
     matchByContent: matchByContent,
     matchByStem: matchByStem,
@@ -1844,6 +2806,7 @@
     pdfFromPages: pdfFromPages,
     buildCleanPdf: buildCleanPdf,
     omrFindDisks: omrFindDisks,
+    omrLatticeScan: omrLatticeScan,
     readOmrSheet: readOmrSheet,
     readKeyTable: readKeyTable,
     saveResult: saveResult,

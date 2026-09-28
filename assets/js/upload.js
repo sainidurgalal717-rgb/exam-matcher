@@ -21,6 +21,8 @@
     lang: 'eng',
     /* set when the student (or an auto-retry) insists that the pages themselves must be OCR'd */
     forceOcr: false,
+    /* set by the first-page probe when the scan prints its question twice, in two columns */
+    columns: false,
     langForced: '',
     t0: 0,
     tickH: null
@@ -111,9 +113,9 @@
     });
   });
 
-  /* "Auto" starts on the cheap English model; the engine switches to eng+hin by itself when the
-     document turns out to be Hindi, so a plain English paper never pays for the bigger model. */
-  function ocrLang(v) { return !v || v === 'auto' ? 'eng' : v; }
+  /* "Auto" probes one page to learn which models the paper needs. The download is warmed while the
+     student still picks files, so the two never queue behind each other. */
+  function ocrLang(v) { return !v || v === 'auto' ? (state.mode === 'omr' ? 'eng' : 'eng+hin') : v; }
 
   /* Download the OCR model while the student still picks files, not after Match. */
   function warm() {
@@ -199,8 +201,11 @@
 
 
   /* Both files are OCR'd against one shared clock, so a 50-page scan can never hold a student
-     waiting forever — whatever got read in that time is still a usable (partial) result. */
+     waiting forever — whatever got read in that time is still a usable (partial) result.
+     These are floors: a column scan costs minutes per page, so readAll scales the budget by the
+     page count (up to the hard cap) instead of truncating a full paper mid-way. */
   var OCR_BUDGET_MS = 4 * 60 * 1000;
+  var OCR_HARD_CAP_MS = 16 * 60 * 1000;
   /* the opt-in high-resolution pass costs real minutes; it only runs when the student asks for it */
   var OCR_SLOW_BUDGET_MS = 10 * 60 * 1000;
 
@@ -212,14 +217,21 @@
     var nm = which === 'q' ? 'Question Paper' : which === 'k' ? (state.mode === 'mapkey' ? 'दूसरी Series Paper' : 'Answer Key') : 'Answer Key';
     progress(0.05, nm + ' पढ़ रहे हैं…');
     var slow = state.slowPass && which === state.slowWhich;
+    /* measured cost per page, so a 45-page bilingual scan gets its full time instead of a cut-off */
+    var perPageMs = state.columns ? (state.lang === 'eng+hin' ? 45000 : 24000)
+                                  : (state.lang === 'eng+hin' ? 20000 : 8000);
+    if (slow) perPageMs = Math.round(perPageMs * 1.5);
     return M.extractText(file, {
       lang: state.lang === 'auto' ? 'eng' : state.lang,
       /* cleanup only changes how a page looks to OCR — a PDF with a usable text layer is still read
          directly, so it never costs time on a clean file */
       forceOcr: state.forceOcr || slow,
+      columns: !!state.columns,
       ocrEdge: slow ? 1600 : 0,
       enhance: slow,
       deadline: state.deadline,
+      perPageMs: perPageMs,
+      hardDeadline: state.t0 + OCR_HARD_CAP_MS,
       onSkipped: function (n) { state.skipped = (state.skipped || 0) + n; },
       onProgress: function (p) { progress(0.05 + p * 0.6, nm + ' — OCR ' + Math.round(p * 100) + '%'); }
     }).then(function (t) {
@@ -228,8 +240,26 @@
     });
   }
 
-  /* ---------------- OMR Set mode ----------------
-     The student's box holds a bubble sheet, which no text OCR can read, so its filled circles are
+  /* An official key normally arrives as a photo of the printed table ("1 C 31 B …"), which whole-page
+     OCR reads badly and the grid reader reads exactly — so the key box is tried that way first, and
+     handed to the rest of the flow as the plain list it already understands. */
+  function readKey2() {
+    var f = state.k2File;
+    if (!f) return Promise.resolve('');
+    var cached = state.k2Text;
+    if (cached) return Promise.resolve(cached);
+    var isImg = /^image\//.test(f.type) || /\.(png|jpe?g|webp|bmp|gif|tif?f)$/i.test(f.name || '');
+    if (!isImg || !M.readKeyTable) return readAll('k2');
+    progress(0.12, 'Answer Key की table उसकी grid से पढ़ रहे हैं…');
+    return M.readKeyTable(f).then(function (rows) {
+      if (!rows.length) return readAll('k2');
+      var list = rows.map(function (r) { return r.no + ' - ' + r.answer; }).join('\n');
+      state.k2Text = list;
+      return list;
+    }, function () { return readAll('k2'); });
+  }
+
+  /* ---------------- OMR Set mode ----------------     The student's box holds a bubble sheet, which no text OCR can read, so its filled circles are
      found from pixels; the official key normally arrives as a printed table ("1 C 31 B 61 B …") and
      is read with OCR. Every box tries bubbles first and falls back to text, so a key that happens
      to be another bubble sheet — or a student who typed a list — still works with no switch to set. */
@@ -364,6 +394,7 @@
     state.skipped = 0;
     state.forceTried = false;
     state.hindiBroken = false;
+    state.columns = false;
     state.hindiGarbledOnly = false;
     state.lang = state.langForced || 'auto';
     tick(); tickTimer();
@@ -374,23 +405,43 @@
         ? 'Answer key दोबारा, ज़्यादा साफ़ी से पढ़ी जा रही है — इसमें 5-10 minute लग सकते हैं।'
         : 'PDF का text सीधा पढ़ा जाता है (तेज़)। Scanned PDF / photo पर OCR लगता है — language और quality अपने-आप चुनी जाती हैं।'));
 
-    var qTextP, kTextP, k2TextP;
-    if (useText) {
-      qTextP = Promise.resolve($('pasteQ').value);
-      kTextP = Promise.resolve($('pasteK').value);
-      k2TextP = Promise.resolve($('pasteK2').value);
-    } else {
-      qTextP = readAll('q'); kTextP = readAll('k');
-      k2TextP = state.mode === 'mapkey' ? readAll('k2') : Promise.resolve('');
-    }
+    pickLang(useText).then(function () {
+      var qTextP, kTextP, k2TextP;
+      if (useText) {
+        qTextP = Promise.resolve($('pasteQ').value);
+        kTextP = Promise.resolve($('pasteK').value);
+        k2TextP = Promise.resolve($('pasteK2').value);
+      } else {
+        qTextP = readAll('q'); kTextP = readAll('k');
+        k2TextP = state.mode === 'mapkey' ? readKey2() : Promise.resolve('');
+      }
+      return Promise.all([qTextP, kTextP, k2TextP]);
+    }).then(function (res) { handleTexts(res[0], res[1], res[2], useText); }).catch(fail);
+  }
 
-    Promise.all([qTextP, kTextP, k2TextP]).then(function (res) { handleTexts(res[0], res[1], res[2], useText); }).catch(fail);
+  /* Students photograph bilingual papers, and an English-only OCR of the Hindi column returns junk
+     that loses both the Hindi copy and most printed question numbers. One page decides which models
+     the whole run needs, so an English-only paper still gets the fast pass. */
+  function pickLang(useText) {
+    if (state.langForced) { state.lang = state.langForced; return Promise.resolve(); }
+    if (useText) { state.lang = 'eng+hin'; return Promise.resolve(); }
+    if (state.mode === 'omr' || !state.qFile) { state.lang = 'auto'; return Promise.resolve(); }
+    if (state.qText) return Promise.resolve();
+    state.lang = 'auto';
+    progress(0.02, 'भाषा और paper की बनावट पहचानी जा रही है (पहला page)…');
+    return M.probePaper(state.qFile).then(function (r) {
+      state.lang = r.hindi ? 'eng+hin' : 'eng';
+      /* a two-column bilingual page is read column by column — see matcher.probePaper */
+      state.columns = !!r.columns;
+    }, function () { state.lang = 'eng'; });
   }
 
   function handleTexts(qTextIn, kTextIn, k2TextIn, useText) {
     progress(0.7, 'प्रश्न पहचान रहे हैं…');
-    var qText = (qTextIn || '').trim();
-    var kText = (kTextIn || '').trim();
+    /* a two-column bilingual paper — scanned or pasted — comes back with both languages glued onto
+       every line, which no parser can follow; separating the columns is what makes it readable */
+    var qText = M.splitScripts((qTextIn || '').trim());
+    var kText = M.splitScripts((kTextIn || '').trim());
     var k2Text = (k2TextIn || '').trim();
     if (!qText) throw new Error('Question Paper का text नहीं मिला। file साफ है तो दोबारा try करें, या Text paste mode इस्तेमाल करें।');
     if (!kText) throw new Error((state.mode === 'mapkey' ? 'दूसरी Series के Paper' : 'Answer Key') + ' का text नहीं मिला। key की file check करें या Text paste mode use करें।');
@@ -798,9 +849,11 @@
   }
 
   function questionCell(row) {
-    var q = esc(row.question || '').replace(/\s+/g, ' ').trim();
-    var alt = esc(row.questionAlt || '').replace(/\s+/g, ' ').trim();
-    var opts = (row.options || []).filter(Boolean).map(function (o) { return esc(o).replace(/\s+/g, ' ').trim(); });
+    /* results saved by older runs still carry the broken "ब् लॉक" splits — clean them on the way out */
+    var clean = M.joinDevaWords || function (t) { return t; };
+    var q = esc(clean(row.question || '')).replace(/\s+/g, ' ').trim();
+    var alt = esc(clean(row.questionAlt || '')).replace(/\s+/g, ' ').trim();
+    var opts = (row.options || []).filter(Boolean).map(function (o) { return esc(clean(o)).replace(/\s+/g, ' ').trim(); });
     var html = '<div class="qtext">' + (q || '<i class="muted">' +
       (state.mode === 'omr' ? 'OMR Set — यहाँ मिलान प्रश्न के number से हुआ है, text से नहीं'
                             : 'प्रश्न का text OCR नहीं पढ़ पाया — नीचे edited text में सुधार करें') +
