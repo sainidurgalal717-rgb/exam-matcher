@@ -127,6 +127,9 @@
         });
       }).then(function (parts) { return '\n' + parts.join('\n'); });
     }).then(function (text) {
+      // noOcr: paper-match flow — a scan without a usable text layer is handed to the AI reader
+      // instead of the (Hindi-unreadable) page OCR. Only what pdf.js can read as real text is returned.
+      if (opts.noOcr) return tidyLines(text);
       // Scanned PDF — or a PDF whose built-in text layer is broken/garbled. Render and OCR instead.
       var clean = text.replace(/\s/g, '');
       var hq = hindiQuality(text);
@@ -1837,6 +1840,79 @@
     });
   }
 
+  /* The AI readers want page pictures, not OCR text. Every page comes back as a clean JPEG the same
+     way the browser path builds one — straight out of the scan's own stored image when the PDF has
+     it, so nothing is re-encoded twice. */
+  function pageImages(file, opts) {
+    opts = opts || {};
+    var maxEdge = opts.maxEdge || 1536;
+    var isPdf = /\.pdf$/.test((file.name || '').toLowerCase()) || file.type === 'application/pdf';
+    if (!isPdf) {
+      return loadBitmap(file).then(function (bmp) {
+        var url = pageSource(bmp, maxEdge, false, function (pg) {
+          pg.no = 1;
+          if (opts.onPage) opts.onPage(pg, 1);
+        });
+        return { count: 1, pages: [{ no: 1, url: url }] };
+      });
+    }
+    return file.arrayBuffer().then(function (buf) {
+      var jpegs = jpegPagesFromPdf(buf, 0);
+      if (jpegs) {
+        var pages = [];
+        return mapLimit(jpegs.map(function (_, i) { return i; }), 4, function (i) {
+          return jpegToOcrSource(jpegs[i], maxEdge, false, function (pg) {
+            pg.no = i + 1;
+            if (opts.onPage) opts.onPage(pg, jpegs.length);
+          }).then(function (url) { pages[i] = { no: i + 1, url: url }; });
+        }).then(function () { return { count: jpegs.length, pages: pages }; });
+      }
+      /* a PDF that keeps its pages in an exotic codec has to go through pdf.js like everything else */
+      return renderPdfToImages(buf.slice ? buf.slice(0) : buf, maxEdge, opts.onPage);
+    });
+  }
+
+  function renderPdfToImages(buf, maxEdge, onPage) {
+    var count = 0, nos = [], i;
+    return loadScript(PDFJS_CDN, 'pdfjs').then(function () {
+      global.pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER;
+      return global.pdfjsLib.getDocument({ data: buf }).promise;
+    }).then(function (doc) {
+      count = doc.numPages;
+      for (i = 1; i <= count; i++) nos.push(i);
+      return mapLimit(nos, 2, function (pn) {
+        return doc.getPage(pn).then(function (p) {
+          var vp0 = p.getViewport({ scale: 1 });
+          return renderPageToDataURL(doc, pn, maxEdge / Math.max(vp0.width, vp0.height), {
+            onPage: function (pg) { pg.no = pn; if (onPage) onPage(pg, count); }
+          });
+        });
+      });
+    }).then(function (urls) {
+      return { count: count, pages: urls.map(function (url, k) { return { no: k + 1, url: url }; }) };
+    }, function () { return { count: count, pages: [] }; });
+  }
+
+  /* How many pages a file has, without decoding any of them: a scanner PDF's page count is just the
+     number of JPEG streams it carries, and only an exotic PDF needs pdf.js. */
+  function pdfPageCount(file) {
+    if (!file) return Promise.resolve(0);
+    var isPdf = /\.pdf$/.test((file.name || '').toLowerCase()) || file.type === 'application/pdf';
+    if (!isPdf) return Promise.resolve(1);
+    return file.arrayBuffer().then(function (buf) {
+      var jpegs = jpegPagesFromPdf(buf, 0);
+      if (jpegs) return jpegs.length;
+      return loadScript(PDFJS_CDN, 'pdfjs').then(function () {
+        global.pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER;
+        return global.pdfjsLib.getDocument({ data: buf.slice ? buf.slice(0) : buf }).promise;
+      }).then(function (doc) {
+        var n = doc.numPages;
+        if (doc.destroy) doc.destroy();
+        return n;
+      });
+    }, function () { return 0; });
+  }
+
   function extractText(file, opts) {
     opts = opts || {};
     var name = (file.name || '').toLowerCase();
@@ -1844,6 +1920,8 @@
       return extractFromPdf(file, opts);
     }
     if (/^image\//.test(file.type) || /\.(png|jpe?g|webp|bmp|gif|tif?f)$/.test(name)) {
+      // noOcr: paper-match flow reads photos/scans with the AI, not with the page OCR
+      if (opts.noOcr) return Promise.resolve('');
       /* a phone photo of a bilingual page is the same two-column problem, one page at a time */
       if (opts.columns) {
         return loadBitmap(file).then(function (bmp) {
@@ -2803,6 +2881,8 @@
     hindiQuality: hindiQuality,
     latinShare: latinShare,
     jpegPagesFromPdf: jpegPagesFromPdf,
+    pageImages: pageImages,
+    pdfPageCount: pdfPageCount,
     pdfFromPages: pdfFromPages,
     buildCleanPdf: buildCleanPdf,
     omrFindDisks: omrFindDisks,

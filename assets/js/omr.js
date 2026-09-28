@@ -38,20 +38,32 @@
   wireDrop('dropK', 'inputK', 'k');
 
   /* Bubble-sheet photo: detect filled circles pixel-by-pixel; anything else (or a sheet whose
-     bubbles we can't find) falls back to plain text OCR + "1 - A" pair parsing. */
-  function readOne(file, pFrom, pTo) {
+     bubbles we can't find) falls back to plain text OCR + "1 - A" pair parsing. A printed
+     answer-key table is the opposite case: its ruled grid is read in a couple of seconds and
+     page-OCR can never read its Hindi headers, so the key box checks the grid first. */
+  function readOne(file, pFrom, pTo, which) {
     if (!file) return Promise.resolve([]);
     if (/^image\//.test(file.type) && M.readOmrSheet) {
-      return M.readOmrSheet(file, {
-        optCount: st.optCount,
-        qCount: st.qCount,
-        onProgress: function (p) { progress(pFrom + p * (pTo - pFrom) * 0.7); }
-      }).then(function (bubs) {
-        if (bubs && bubs.length) return bubs;
-        return textPairs(file, pFrom + (pTo - pFrom) * 0.7, pTo);
-      });
+      if (which === 'k' && M.readKeyTable) {
+        return M.readKeyTable(file).then(function (rows) {
+          if (rows.length) return rows;
+          return sheetThenText(file, pFrom, pTo);
+        });
+      }
+      return sheetThenText(file, pFrom, pTo);
     }
     return textPairs(file, pFrom, pTo);
+  }
+
+  function sheetThenText(file, pFrom, pTo) {
+    return M.readOmrSheet(file, {
+      optCount: st.optCount,
+      qCount: st.qCount,
+      onProgress: function (p) { progress(pFrom + p * (pTo - pFrom) * 0.7); }
+    }).then(function (bubs) {
+      if (bubs && bubs.length) return bubs;
+      return textPairs(file, pFrom + (pTo - pFrom) * 0.7, pTo);
+    });
   }
 
   function textPairs(file, pFrom, pTo) {
@@ -76,7 +88,7 @@
     st.qCount = n;
     st.answers = {};
 
-    Promise.all([readOne(st.sFile, 0.03, 0.48), readOne(st.kFile, 0.5, 0.95)]).then(function (res) {
+    Promise.all([readOne(st.sFile, 0.03, 0.48, 's'), readOne(st.kFile, 0.5, 0.95, 'k')]).then(function (res) {
       (res[0] || []).forEach(function (a) {
         var d = parseInt(a.answer, 10);
         if (d > 0 && d <= st.optCount) a.answer = String.fromCharCode(64 + d);
@@ -84,14 +96,26 @@
       });
       st.key = (res[1] || []).filter(function (a) { return a.no >= 1 && a.no <= 300; });
 
-      if (!st.key.length) {
-        status('warn', 'Answer Key से answers नहीं मिले',
-          'Key की sheet में filled bubbles नहीं मिले — साफ photo upload करके फिर कोशिश करें, या <a href="upload.html">Upload &amp; Match</a> page पर key की list paste करें।');
+      function finishKey() {
+        if (!st.key.length) {
+          status('warn', 'Answer Key से answers नहीं मिले',
+            'Key की sheet में filled bubbles नहीं मिले — साफ photo upload करके फिर कोशिश करें, या <a href="upload.html">Upload &amp; Match</a> page पर key की list paste करें।');
+        }
+        progress(1);
+        setTimeout(function () { $('progWrap').classList.add('hide'); }, 400);
+        self.disabled = false;
+        buildGrid(n, Object.keys(st.answers).length);
       }
-      progress(1);
-      setTimeout(function () { $('progWrap').classList.add('hide'); }, 400);
-      self.disabled = false;
-      buildGrid(n, Object.keys(st.answers).length);
+
+      /* Page-OCR stays on this page, but a Hindi-headed key that no reader could crack at all goes to
+         the AI as a last resort. Only the key box is ever sent — a bubble sheet is read from pixels. */
+      if (st.key.length || !st.kFile || !window.ExamAI || !window.ExamAI.available()) { finishKey(); return; }
+      status('info', 'AI (Gemini / Groq) से key पढ़ी जा रही है…', 'Grid और OCR से key नहीं पढ़ी जा सकी — pages AI को भेजी जा रही हैं।');
+      progress(0.96);
+      window.ExamAI.readFile(st.kFile, { deadline: Date.now() + 4 * 60 * 1000 }).then(function (r) {
+        st.key = M.parseAnswerKey((r && r.text) || '').filter(function (a) { return a.no >= 1 && a.no <= 300; });
+        finishKey();
+      }, function () { finishKey(); });
     }).catch(function (err) {
       self.disabled = false;
       $('progWrap').classList.add('hide');
