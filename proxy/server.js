@@ -1,6 +1,9 @@
 /* Tiny origin-checked proxy for exam-matcher's AI calls.
-   The provider keys live here as environment variables (GEMINI_KEY or GEMINI_API_KEY,
-   GROQ_KEY or GROQ_API_KEY) and never ship in the website, so nothing public can leak them.
+   Provider keys live here as environment variables and never ship in the website, so nothing
+   public can leak them. Each provider accepts a whole pool: GEMINI_KEYS / GROQ_KEYS are
+   comma- or newline-separated lists (the single GEMINI_API_KEY / GROQ_API_KEY still work).
+   When a key hits its rate limit (429) or is dead (401/403), the proxy silently switches to the
+   next key in the pool and retries, so the website never sees the limit.
    The site on the allowed origins is the only caller.
 
    Routes:  /gemini/*  -> https://generativelanguage.googleapis.com/*
@@ -12,8 +15,15 @@ const http = require('http');
 const https = require('https');
 
 const PORT = process.env.PORT || 10000;
-const GEMINI_KEY = process.env.GEMINI_KEY || process.env.GEMINI_API_KEY || '';
-const GROQ_KEY = process.env.GROQ_KEY || process.env.GROQ_API_KEY || '';
+
+function keyPool(listVar, singleVar) {
+  const raw = [process.env[listVar], process.env[singleVar]].filter(Boolean).join(',');
+  return Array.from(new Set(raw.split(/[\s,;]+/).map(function (s) { return s.trim(); }).filter(Boolean)));
+}
+
+const GEMINI_KEYS = keyPool('GEMINI_KEYS', 'GEMINI_API_KEY');
+const GROQ_KEYS = keyPool('GROQ_KEYS', 'GROQ_API_KEY');
+const cursor = { gemini: 0, groq: 0 };
 
 const ORIGINS = new Set([
   'https://exam-matcher.onrender.com',
@@ -23,19 +33,27 @@ const ORIGINS = new Set([
 
 const UPSTREAM_MS = 90000;
 const MAX_BODY = 20 * 1024 * 1024;
+const MAX_KEY_HOPS = 8;   /* rate-limited/dead keys tried before giving the client the real answer */
 
 const ROUTES = {
   gemini: {
-    base: 'https://generativelanguage.googleapis.com',
-    key: function () { return GEMINI_KEY; },
+    pool: GEMINI_KEYS,
+    cursor: 'gemini',
     headers: function (key) { return { 'x-goog-api-key': key }; }
   },
   groq: {
-    base: 'https://api.groq.com/openai',
-    key: function () { return GROQ_KEY; },
+    pool: GROQ_KEYS,
+    cursor: 'groq',
     headers: function (key) { return { authorization: 'Bearer ' + key }; }
   }
 };
+
+function nextKey(conf) {
+  if (!conf.pool.length) return '';
+  const key = conf.pool[cursor[conf.cursor] % conf.pool.length];
+  cursor[conf.cursor]++;
+  return key;
+}
 
 function corsHeaders(origin) {
   return {
@@ -62,7 +80,7 @@ const server = http.createServer(function (req, res) {
   const t0 = Date.now();
 
   if (url === '/' || url.split('?')[0] === '/ping') {
-    return json(res, 200, { ok: true }, okOrigin ? origin : '');
+    return json(res, 200, { ok: true, gemini: GEMINI_KEYS.length, groq: GROQ_KEYS.length }, okOrigin ? origin : '');
   }
 
   if (req.method === 'OPTIONS') {
@@ -78,8 +96,8 @@ const server = http.createServer(function (req, res) {
 
   const route = m[1];
   const conf = ROUTES[route];
-  const key = conf.key();
-  if (!key) return json(res, 500, { error: { message: route + ' key not configured on proxy' } }, origin);
+  const hopsLeft = Math.min(conf.pool.length, MAX_KEY_HOPS);
+  if (!hopsLeft) return json(res, 500, { error: { message: route + ' key not configured on proxy' } }, origin);
 
   const rest = url.slice(m[0].length) || '/';
   const chunks = [];
@@ -103,49 +121,62 @@ const server = http.createServer(function (req, res) {
   req.on('end', function () {
     if (over || res.headersSent) return;
     const body = Buffer.concat(chunks);
-    const target = new URL(conf.base + rest);
-    const headers = Object.assign({}, conf.headers(key), { 'accept-encoding': 'identity' });
-    if (body.length) {
-      headers['content-type'] = req.headers['content-type'] || 'application/json';
-      headers['content-length'] = body.length;
+
+    function send(hops) {
+      const key = nextKey(conf);
+      if (!key) return json(res, 500, { error: { message: route + ' key not configured on proxy' } }, origin);
+      const target = new URL(conf.base + rest);
+      const headers = Object.assign({}, conf.headers(key), { 'accept-encoding': 'identity' });
+      if (body.length) {
+        headers['content-type'] = req.headers['content-type'] || 'application/json';
+        headers['content-length'] = body.length;
+      }
+
+      let up = null;
+      res.on('close', function () {
+        if (!res.writableEnded && up) up.destroy();
+      });
+
+      up = https.request({
+        hostname: target.hostname,
+        path: target.pathname + target.search,
+        method: req.method,
+        headers: headers,
+        timeout: UPSTREAM_MS
+      }, function (upRes) {
+        const st = upRes.statusCode || 502;
+        /* rate-limited or dead key: hand the request to the next key in the pool */
+        if ((st === 429 || st === 401 || st === 403) && hops > 1) {
+          upRes.resume();
+          return send(hops - 1);
+        }
+        const h = corsHeaders(origin);
+        if (upRes.headers['content-type']) h['content-type'] = upRes.headers['content-type'];
+        if (upRes.headers['content-encoding']) h['content-encoding'] = upRes.headers['content-encoding'];
+        res.writeHead(st, h);
+        upRes.pipe(res);
+        upRes.on('end', function () {
+          console.log(req.method, url, st, Date.now() - t0 + 'ms' +
+            (hops < hopsLeft ? ' (key ' + (hopsLeft - hops + 1) + '/' + hopsLeft + ')' : ''));
+        });
+      });
+
+      up.on('timeout', function () { up.destroy(new Error('upstream timeout')); });
+      up.on('error', function (e) {
+        console.error(req.method, url, 'upstream error:', e.message);
+        if (!res.headersSent) json(res, 502, { error: { message: 'upstream: ' + e.message } }, origin);
+        else res.destroy();
+      });
+
+      if (body.length) up.write(body);
+      up.end();
     }
 
-    let up = null;
-    res.on('close', function () {
-      if (!res.writableEnded && up) up.destroy();
-    });
-
-    up = https.request({
-      hostname: target.hostname,
-      path: target.pathname + target.search,
-      method: req.method,
-      headers: headers,
-      timeout: UPSTREAM_MS
-    }, function (upRes) {
-      const h = corsHeaders(origin);
-      if (upRes.headers['content-type']) h['content-type'] = upRes.headers['content-type'];
-      if (upRes.headers['content-encoding']) h['content-encoding'] = upRes.headers['content-encoding'];
-      res.writeHead(upRes.statusCode || 502, h);
-      upRes.pipe(res);
-      upRes.on('end', function () {
-        console.log(req.method, url, upRes.statusCode, Date.now() - t0 + 'ms');
-      });
-    });
-
-    up.on('timeout', function () { up.destroy(new Error('upstream timeout')); });
-    up.on('error', function (e) {
-      console.error(req.method, url, 'upstream error:', e.message);
-      if (!res.headersSent) json(res, 502, { error: { message: 'upstream: ' + e.message } }, origin);
-      else res.destroy();
-    });
-
-    if (body.length) up.write(body);
-    up.end();
+    send(hopsLeft);
   });
 });
 
 server.listen(PORT, function () {
   console.log('exam-matcher AI proxy on :' + PORT +
-    ' (gemini key: ' + (GEMINI_KEY ? 'set' : 'MISSING') +
-    ', groq key: ' + (GROQ_KEY ? 'set' : 'MISSING') + ')');
+    ' (gemini keys: ' + GEMINI_KEYS.length + ', groq keys: ' + GROQ_KEYS.length + ')');
 });
