@@ -1,23 +1,19 @@
 /* Optional AI reading pass: one page picture per call, Gemini Flash first, Groq's vision model if
    Gemini refuses. This runs only when the browser's own reading came back thin — a clean PDF with a
-   text layer never reaches this file. */
+   text layer never reaches this file.
+
+   Every call goes through the small proxy service in proxy/server.js (free Render web service).
+   That proxy is the only place the provider keys exist, so no key ever ships inside this file. */
 (function (global) {
   'use strict';
 
   var M = global.ExamMatcher;
 
-  /* ────────────────────────────────────────────────────────────────────────────────
-     KEYS — fill these two lines only.
-     Google AI Studio → Get API key : https://aistudio.google.com/apikey
-     Groq Console     → API Keys    : https://console.groq.com/keys
-     ──────────────────────────────────────────────────────────────────────────────── */
-  var KEYS = {
-    gemini: 'AQ.Ab8RN6LHh9rVp8YX84cX_VdkVlvbsYLATeF0am7VdqHJxrR0sg',
-    groq: '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'
-  };
-
-  var GEMINI_HOST = 'https://generativelanguage.googleapis.com/v1beta';
-  var GROQ_HOST = 'https://api.groq.com/openai/v1';
+  /* The proxy address. Overridable from the console for local testing:
+     EXAMAI_PROXY = 'http://localhost:8899' */
+  var PROXY = global.EXAMAI_PROXY || 'https://exam-matcher-ai.onrender.com';
+  var GEMINI_HOST = PROXY + '/gemini/v1beta';
+  var GROQ_HOST = PROXY + '/groq/v1';
   var CONC = 3;            /* pages in flight at once */
   var PAGE_MS = 75000;     /* one page may take this long before it counts as failed */
   var MAX_PAGES = 60;      /* a single paper is never longer than this */
@@ -87,6 +83,20 @@
     return new Promise(function (r) { setTimeout(r, ms); });
   }
 
+  /* A free Render instance sleeps after ~15 idle minutes and takes ~30–50 s to wake. This ping is
+     fired the moment the page loads (long before any scan is ready) so the proxy is usually already
+     awake; if it is still waking, waitWarm gives it a 20 s head start and never blocks past that. */
+  var warmP = null;
+  function warm() {
+    if (warmP) return warmP;
+    warmP = PROXY
+      ? global.fetch(PROXY + '/ping', { mode: 'cors' }).catch(function () {}).then(function () {})
+      : Promise.resolve();
+    return warmP;
+  }
+
+  function waitWarm() { return Promise.race([warm(), sleep(20000)]); }
+
   /* A printed answer-key table sometimes comes back as a markdown table even though the prompt
      forbids it ("| 1 | C |"). Put those rows back into "1 - C" so the key reader can count them. */
   function untable(t) {
@@ -114,8 +124,9 @@
   }
 
   function geminiFind() {
-    return fetchJson(GEMINI_HOST + '/models?pageSize=200',
-      { headers: { 'x-goog-api-key': KEYS.gemini } }, 20000).then(function (j) {
+    return waitWarm().then(function () {
+      return fetchJson(GEMINI_HOST + '/models?pageSize=200', {}, 45000);
+    }).then(function (j) {
       var out = [];
       ((j && j.models) || []).forEach(function (m) {
         var name = String(m.name || '').replace(/^models\//, '');
@@ -151,8 +162,9 @@
   ];
 
   function groqFind() {
-    return fetchJson(GROQ_HOST + '/models',
-      { headers: { Authorization: 'Bearer ' + KEYS.groq } }, 20000).then(function (j) {
+    return waitWarm().then(function () {
+      return fetchJson(GROQ_HOST + '/models', {}, 45000);
+    }).then(function (j) {
       var ids = ((j && j.data) || []).map(function (m) { return m.id; }).filter(Boolean);
       var out = [];
       GROQ_PREFER.forEach(function (p) { if (ids.indexOf(p) >= 0) out.push(p); });
@@ -199,7 +211,7 @@
       call: function (model, dataUrl) {
         return fetchJson(GROQ_HOST + '/chat/completions', {
           method: 'POST',
-          headers: { Authorization: 'Bearer ' + KEYS.groq, 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             model: model,
             temperature: 0,
@@ -222,7 +234,7 @@
       ping: function (model) {
         return fetchJson(GROQ_HOST + '/chat/completions', {
           method: 'POST',
-          headers: { Authorization: 'Bearer ' + KEYS.groq, 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             model: model, temperature: 0, max_tokens: 16,
             messages: [{ role: 'user', content: 'Reply with exactly: OK' }]
@@ -244,7 +256,7 @@
   function geminiPost(model, cfg, parts, prov) {
     return fetchJson(GEMINI_HOST + '/models/' + model + ':generateContent', {
       method: 'POST',
-      headers: { 'x-goog-api-key': KEYS.gemini, 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ contents: [{ parts: parts }], generationConfig: cfg })
     }).then(function (j) {
       var c = j && j.candidates && j.candidates[0];
@@ -281,9 +293,7 @@
   var current = null;  /* the provider that is working, reused for every later page */
 
   function configured() {
-    var out = [];
-    ORDER.forEach(function (id) { if (KEYS[id]) out.push(id); });
-    return out;
+    return PROXY ? ORDER.slice() : [];
   }
 
   function available() { return configured().length > 0; }
@@ -363,7 +373,7 @@
   function readFile(file, opts) {
     opts = opts || {};
     var t0 = Date.now();
-    if (!available()) return Promise.reject(new Error('कोई AI key सेट नहीं है'));
+    if (!available()) return Promise.reject(new Error('कोई AI service सेट नहीं है'));
     if (!M || !M.pageImages) return Promise.reject(new Error('page renderer उपलब्ध नहीं'));
     var done = 0, failed = [], texts = [];
     return M.pageImages(file, {
@@ -405,7 +415,7 @@
     });
   }
 
-  /* Is each key alive, and which model would be used? Run from the console on the live site.
+  /* Is the service alive, and which model would be used? Run from the console on the live site.
      The first three candidates are tried, because the top-ranked model is often the one that is
      overloaded (503) and the run would still succeed on the next one down. */
   function selfTest() {
@@ -446,18 +456,17 @@
 
   function config() {
     return {
-      keys: ORDER.map(function (id) {
-        var k = KEYS[id];
-        return id + ': ' + (k ? k.slice(0, 6) + '…' + k.slice(-4) + ' (' + k.length + ')' : 'खाली');
-      }),
-      gemini: { want: KEYS.gemini, model: (ready.gemini && ready.gemini[0]) || null },
-      groq: { want: KEYS.groq, model: (ready.groq && ready.groq[0]) || null },
+      proxy: PROXY,
+      providers: configured(),
+      gemini: { model: (ready.gemini && ready.gemini[0]) || null },
+      groq: { model: (ready.groq && ready.groq[0]) || null },
       current: current
     };
   }
 
+  warm();   /* wake the proxy now, not when the first scan is ready */
+
   global.ExamAI = {
-    KEYS: KEYS,
     available: available,
     readFile: readFile,
     selfTest: selfTest,
