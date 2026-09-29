@@ -37,11 +37,13 @@ const MAX_KEY_HOPS = 8;   /* rate-limited/dead keys tried before giving the clie
 
 const ROUTES = {
   gemini: {
+    base: 'https://generativelanguage.googleapis.com',
     pool: GEMINI_KEYS,
     cursor: 'gemini',
     headers: function (key) { return { 'x-goog-api-key': key }; }
   },
   groq: {
+    base: 'https://api.groq.com/openai',
     pool: GROQ_KEYS,
     cursor: 'groq',
     headers: function (key) { return { authorization: 'Bearer ' + key }; }
@@ -125,51 +127,57 @@ const server = http.createServer(function (req, res) {
     function send(hops) {
       const key = nextKey(conf);
       if (!key) return json(res, 500, { error: { message: route + ' key not configured on proxy' } }, origin);
-      const target = new URL(conf.base + rest);
-      const headers = Object.assign({}, conf.headers(key), { 'accept-encoding': 'identity' });
-      if (body.length) {
-        headers['content-type'] = req.headers['content-type'] || 'application/json';
-        headers['content-length'] = body.length;
-      }
-
       let up = null;
-      res.on('close', function () {
-        if (!res.writableEnded && up) up.destroy();
-      });
-
-      up = https.request({
-        hostname: target.hostname,
-        path: target.pathname + target.search,
-        method: req.method,
-        headers: headers,
-        timeout: UPSTREAM_MS
-      }, function (upRes) {
-        const st = upRes.statusCode || 502;
-        /* rate-limited or dead key: hand the request to the next key in the pool */
-        if ((st === 429 || st === 401 || st === 403) && hops > 1) {
-          upRes.resume();
-          return send(hops - 1);
+      try {
+        const target = new URL(conf.base + rest);
+        const headers = Object.assign({}, conf.headers(key), { 'accept-encoding': 'identity' });
+        if (body.length) {
+          headers['content-type'] = req.headers['content-type'] || 'application/json';
+          headers['content-length'] = body.length;
         }
-        const h = corsHeaders(origin);
-        if (upRes.headers['content-type']) h['content-type'] = upRes.headers['content-type'];
-        if (upRes.headers['content-encoding']) h['content-encoding'] = upRes.headers['content-encoding'];
-        res.writeHead(st, h);
-        upRes.pipe(res);
-        upRes.on('end', function () {
-          console.log(req.method, url, st, Date.now() - t0 + 'ms' +
-            (hops < hopsLeft ? ' (key ' + (hopsLeft - hops + 1) + '/' + hopsLeft + ')' : ''));
+
+        res.on('close', function () {
+          if (!res.writableEnded && up) up.destroy();
         });
-      });
 
-      up.on('timeout', function () { up.destroy(new Error('upstream timeout')); });
-      up.on('error', function (e) {
-        console.error(req.method, url, 'upstream error:', e.message);
-        if (!res.headersSent) json(res, 502, { error: { message: 'upstream: ' + e.message } }, origin);
+        up = https.request({
+          hostname: target.hostname,
+          path: target.pathname + target.search,
+          method: req.method,
+          headers: headers,
+          timeout: UPSTREAM_MS
+        }, function (upRes) {
+          const st = upRes.statusCode || 502;
+          /* rate-limited or dead key: hand the request to the next key in the pool */
+          if ((st === 429 || st === 401 || st === 403) && hops > 1) {
+            upRes.resume();
+            return send(hops - 1);
+          }
+          const h = corsHeaders(origin);
+          if (upRes.headers['content-type']) h['content-type'] = upRes.headers['content-type'];
+          if (upRes.headers['content-encoding']) h['content-encoding'] = upRes.headers['content-encoding'];
+          res.writeHead(st, h);
+          upRes.pipe(res);
+          upRes.on('end', function () {
+            console.log(req.method, url, st, Date.now() - t0 + 'ms' +
+              (hops < hopsLeft ? ' (key ' + (hopsLeft - hops + 1) + '/' + hopsLeft + ')' : ''));
+          });
+        });
+
+        up.on('timeout', function () { up.destroy(new Error('upstream timeout')); });
+        up.on('error', function (e) {
+          console.error(req.method, url, 'upstream error:', e.message);
+          if (!res.headersSent) json(res, 502, { error: { message: 'upstream: ' + e.message } }, origin);
+          else res.destroy();
+        });
+
+        if (body.length) up.write(body);
+        up.end();
+      } catch (e) {
+        console.error(req.method, url, 'proxy error:', e.message);
+        if (!res.headersSent) json(res, 502, { error: { message: 'proxy: ' + e.message } }, origin);
         else res.destroy();
-      });
-
-      if (body.length) up.write(body);
-      up.end();
+      }
     }
 
     send(hopsLeft);
