@@ -89,6 +89,18 @@
     st.answers = {};
 
     Promise.all([readOne(st.sFile, 0.03, 0.48, 's'), readOne(st.kFile, 0.5, 0.95, 'k')]).then(function (res) {
+      /* the sheet itself decides the form: a photo whose blocks each carry 5 option columns is a
+         150-question A–E paper, whatever the page was opened with — sync the inputs, or the grid
+         would show the wrong number of questions in the wrong alphabet */
+      var lay = res[0] && res[0]._layout;
+      if (lay && lay.qCount >= 5 && lay.qCount <= 300 && lay.optCount >= 2 && lay.optCount <= 8) {
+        n = lay.qCount;
+        st.optCount = lay.optCount;
+        st.qCount = n;
+        if ($('qCount')) $('qCount').value = n;
+        var ocEl = $('optCount');
+        if (ocEl && ocEl.querySelector('option[value="' + lay.optCount + '"]')) ocEl.value = lay.optCount;
+      }
       (res[0] || []).forEach(function (a) {
         var d = parseInt(a.answer, 10);
         if (d > 0 && d <= st.optCount) a.answer = String.fromCharCode(64 + d);

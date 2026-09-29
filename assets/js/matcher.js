@@ -938,6 +938,12 @@
     });
     info.NB = NB;
     if (NB < 1 || nbBest < 3) return { answers: [], _dbg: dbg ? info : undefined };
+    /* a row of one mark per block only makes sense when all blocks carry the same set of option
+       columns, and on a sheet whose blocks stand one per option — the phone-photo case this
+       reader exists for — the block count IS the option count. The caller's guess (the page
+       ships 4 options) would fit the comb to the wrong number of columns */
+    if (NB >= 3 && NB <= 8) optCount = NB;
+    info.optC = optCount;
 
     /* the paper fixes the layout: qCount questions over NB side-by-side blocks means qCount/NB
        rows in every block. The chain can pick up the frame's closing line below the last row
@@ -978,6 +984,76 @@
     info.qual = qual;
     if (qual < 2) return { answers: [], _dbg: dbg ? info : undefined };
 
+    /* The camera fans the page. Measured on a phone photo, the lean differs from block to block
+       (the rightmost block's columns lean up to about a tenth of a bubble per row of height, the
+       leftmost lean the other way), so a comb fitted near a block's bottom sits most of a slot
+       off at its top and the student's mark gets read as the letter beside it. The lean is
+       measured from the student's own marks: within a block every mark sits on the same five
+       printed columns, so the slope that packs them tightest once straightened (x - s*(y - yc))
+       is the block's lean. All three masks are resampled once so the columns stand up, and every
+       recorded mark is moved back the same way, leaving the rest of the reader untouched. */
+    (function () {
+      var yc3 = (rowsY[0] + rowsY[rowsY.length - 1]) / 2;
+      var cap = 0.4 * P, bX = [], bS = [], i2, j2, q3;
+      for (i2 = 0; i2 < NB; i2++) {
+        var fl3 = fillsPerBlock[i2];
+        if (fl3.length < 6) continue;
+        var cxm = 0;
+        for (j2 = 0; j2 < fl3.length; j2++) cxm += fl3[j2].x;
+        cxm /= fl3.length;
+        var bestS2 = 0, bestC2 = Infinity;
+        for (var sC = -0.06; sC <= 0.1001; sC += 0.0025) {
+          var arr3 = [];
+          for (j2 = 0; j2 < fl3.length; j2++) arr3.push(fl3[j2].x - sC * (fl3[j2].y - yc3));
+          arr3.sort(function (a3, b3) { return a3 - b3; });
+          var cost3 = 0;
+          for (q3 = 1; q3 < arr3.length; q3++) cost3 += Math.min(arr3[q3] - arr3[q3 - 1], cap);
+          if (cost3 < bestC2) { bestC2 = cost3; bestS2 = sC; }
+        }
+        bX.push(cxm); bS.push(bestS2);
+      }
+      info.kvalid = bX.length;
+      info.kbs = bS.map(function (v3) { return Math.round(v3 * 1e4) / 1e4; });
+      if (bX.length < 2) return;
+      for (q3 = 1; q3 < bX.length; q3++) if (bX[q3] <= bX[q3 - 1]) return;
+      for (q3 = 0; q3 < bS.length; q3++) {
+        if (bS[q3] > 0.12) bS[q3] = 0.12;
+        if (bS[q3] < -0.12) bS[q3] = -0.12;
+      }
+      info.kyc = Math.round(yc3);
+      info.kbx = bX.map(function (v3) { return Math.round(v3); });
+      var kx = new Float32Array(w), x3;
+      for (x3 = 0; x3 < w; x3++) {
+        var sV;
+        if (x3 <= bX[0]) sV = bS[0];
+        else if (x3 >= bX[bX.length - 1]) sV = bS[bS.length - 1];
+        else {
+          var q4 = 0;
+          while (q4 < bX.length - 2 && x3 > bX[q4 + 1]) q4++;
+          var wq = (x3 - bX[q4]) / ((bX[q4 + 1] - bX[q4]) || 1);
+          sV = bS[q4] + wq * (bS[q4 + 1] - bS[q4]);
+        }
+        kx[x3] = sV;
+      }
+      var tA = new Uint8Array(w * H), lA = new Uint8Array(w * H), mA = new Uint8Array(w * H);
+      for (var y3 = 0; y3 < H; y3++) {
+        var dy3 = y3 - yc3, b8 = y3 * w;
+        for (x3 = 0; x3 < w; x3++) {
+          var xs3 = x3 + kx[x3] * dy3;
+          if (xs3 < 0 || xs3 >= w - 0.5) continue;
+          var xi3 = (xs3 + 0.5) | 0;
+          tA[b8 + x3] = sT[b8 + xi3];
+          lA[b8 + x3] = sL[b8 + xi3];
+          mA[b8 + x3] = sM[b8 + xi3];
+        }
+      }
+      sT = tA; sL = lA; sM = mA;
+      for (i2 = 0; i2 < NB; i2++) for (j2 = 0; j2 < fillsPerBlock[i2].length; j2++) {
+        var fk4 = fillsPerBlock[i2][j2];
+        fk4.x -= kx[Math.max(0, Math.min(w - 1, Math.round(fk4.x)))] * (fk4.y - yc3);
+      }
+    })();
+
     /* columns per option: every bubble carries its printed ring and letter whether or not anyone
        filled it, so the printed ink is the reliable comb target — pen ink alone cannot tell
        option A from option B when one of the two was never filled on the whole sheet. The pen
@@ -985,8 +1061,8 @@
        marks, or onto the printed question numbers beside the block, would otherwise collect as
        much ink as the true letter columns */
     var yA = Math.max(0, Math.round(rowsY[0] - 0.6 * P)), yB = Math.min(H - 1, Math.round(rowsY[rowsY.length - 1] + 0.6 * P));
-    var colM = new Float32Array(w);
-    for (y = yA; y <= yB; y++) { var b5 = y * w; for (x = 0; x < w; x++) colM[x] += sM[b5 + x]; }
+    var colM = new Float32Array(w), colRaw = new Float32Array(w);
+    for (y = yA; y <= yB; y++) { var b5 = y * w; for (x = 0; x < w; x++) { colM[x] += sM[b5 + x]; colRaw[x] += sM[b5 + x]; } }
     for (i = 0; i < NB; i++) for (j = 0; j < fillsPerBlock[i].length; j++) {
       var fk = fillsPerBlock[i][j];
       var my0 = Math.max(yA, Math.round(fk.y - 0.5 * P)), my1 = Math.min(yB, Math.round(fk.y + 0.5 * P));
@@ -998,6 +1074,15 @@
       var px0 = Math.max(0, Math.round(cx3 - 0.18 * pw)), px1 = Math.min(w - 1, Math.round(cx3 + 0.18 * pw));
       var s3 = 0;
       for (var q = px0; q <= px1; q++) s3 += colM[q];
+      return s3;
+    }
+    /* same window on the un-erased profile: used to score the option comb, because a column where
+       people actually wrote carries pen ink on top of the printed ring and must win over a column
+       of bare print */
+    function printAtRaw(cx3, pw) {
+      var px0 = Math.max(0, Math.round(cx3 - 0.18 * pw)), px1 = Math.min(w - 1, Math.round(cx3 + 0.18 * pw));
+      var s3 = 0;
+      for (var q = px0; q <= px1; q++) s3 += colRaw[q];
       return s3;
     }
     var colSm = new Float32Array(w);
@@ -1049,10 +1134,21 @@
     info.blockN = []; info.minX = []; info.maxX = []; info.fitA = []; info.fitP = []; info.fitPr = []; info.fitEx = []; info.fitUn = [];
     for (i = 0; i < NB; i++) {
       var bp = fillsPerBlock[i], minX = Infinity, maxX = -Infinity;
-      for (j = 0; j < bp.length; j++) { if (bp[j].x < minX) minX = bp[j].x; if (bp[j].x > maxX) maxX = bp[j].x; }
+      /* a couple of stray marks beside the block (a pen slip, the roll-number strip) used to
+         stretch the anchor window wide enough for the comb to lock onto the printed question
+         numbers instead of the bubble columns. With enough marks, the extreme deciles bound the
+         block and the strays fall outside */
+      var fxs = [];
+      for (j = 0; j < bp.length; j++) fxs.push(bp[j].x);
+      fxs.sort(function (a2, b2) { return a2 - b2; });
+      if (fxs.length) { minX = fxs[0]; maxX = fxs[fxs.length - 1]; }
+      if (fxs.length >= 8) {
+        minX = fxs[Math.floor(0.1 * (fxs.length - 1))];
+        maxX = fxs[Math.floor(0.9 * (fxs.length - 1))];
+      }
       info.blockN.push(bp.length); info.minX.push(Math.round(minX)); info.maxX.push(Math.round(maxX));
-      var anchorLo = minX - 0.9 * P, anchorHi = minX + 1.2 * P;
-      var lastLo = maxX - 1.2 * P, lastHi = maxX + 0.9 * P;
+      var anchorLo = minX - 1.55 * P, anchorHi = minX + 1.2 * P;
+      var lastLo = maxX - 1.35 * P, lastHi = maxX + 1.35 * P;
       var fit = null, bestAny = null;
       /* the comb must cover the block's own marks: the leftmost option column sits within about
          a pitch of the block's leftmost fill and the rightmost within a pitch of its rightmost —
@@ -1070,7 +1166,7 @@
           var last = at + (optCount - 1) * pt2;
           if (last < lastLo || last > lastHi) continue;
           var fs = 0;
-          for (k = 0; k < optCount; k++) fs += printAt(at + k * pt2, P);
+          for (k = 0; k < optCount; k++) fs += printAtRaw(at + k * pt2, P);
           var ex = 0;
           for (j = 0; j < bp.length; j++) {
             var dmn = Infinity;
@@ -1138,34 +1234,339 @@
     info.slotX = slotAll.map(function (s4) { return s4 ? s4.x.map(function (vv) { return Math.round(vv); }) : null; });
     info.slotP = slotAll.map(function (s4) { return s4 ? Math.round(s4.p * 10) / 10 : null; });
 
-    /* every answer row carries printed letters and rings at all comb columns, filled or blank —
-       so a row is added above or below only while the printed ink is there on ALL of them; the
-       booklet header and the declaration below do not have it, so the lattice stops at Q30 */
-    var chk = [];
-    for (i = 0; i < NB; i++) for (k = 0; k < optCount; k++) chk.push({ x: slotAll[i].x[k], p: slotAll[i].p });
-    function rowPrint(cy5, cx5, pw5) {
-      var ry3 = Math.max(0, Math.round(cy5 - 0.35 * pw5)), ry4 = Math.min(H - 1, Math.round(cy5 + 0.35 * pw5));
-      var px3 = Math.max(0, Math.round(cx5 - 0.18 * pw5)), px4 = Math.min(w - 1, Math.round(cx5 + 0.18 * pw5));
-      var s5 = 0;
-      for (var q5 = ry3; q5 <= ry4; q5++) { var b6 = q5 * w; for (var x5 = px3; x5 <= px4; x5++) s5 += sM[b6 + x5]; }
-      return s5;
-    }
-    function rowIsAnswer(cy6) {
-      var vs = [], mn = Infinity;
-      for (var q6 = 0; q6 < chk.length; q6++) {
-        var v6 = rowPrint(cy6, chk[q6].x, chk[q6].p);
-        vs.push(v6); if (v6 < mn) mn = v6;
+    /* The row chain is only a first guess: it starts wherever the mask first sees ink (a header
+       row, a fold) and can end on the printed declaration, so its first index is off by a row or
+       two and every answer number shifts with it. What marks the real rows is the printed ink of
+       the option columns: sum it down every image row and the answer grid becomes a run of crests.
+       A hand-held photo tilts the sheet, so its rows are NOT evenly spaced (the pitch grows toward
+       the camera) — each row is found by snapping to the local crest of that profile, never by
+       stepping a fixed pitch. */
+    var inkByB = [], rowInk = new Float64Array(H);
+    for (i = 0; i < NB; i++) {
+      var s4b = slotAll[i], bi = new Float64Array(H);
+      if (s4b) {
+        for (k = 0; k < optCount; k++) {
+          var wx0 = Math.max(0, Math.round(s4b.x[k] - 0.18 * s4b.p)), wx1 = Math.min(w - 1, Math.round(s4b.x[k] + 0.18 * s4b.p));
+          for (y = 0; y < H; y++) { var b7 = y * w, s7 = 0; for (x = wx0; x <= wx1; x++) s7 += sM[b7 + x]; bi[y] += s7; }
+        }
       }
-      var md = median(vs);
-      return md >= 2 && mn >= 0.35 * md;
+      inkByB.push(bi);
+      for (y = 0; y < H; y++) rowInk[y] += bi[y];
     }
-    for (t = 0; t < 40; t++) { if (rpb && rowsY.length >= rpb) break; var cu = rowsY[0] - P; if (!rowIsAnswer(cu)) break; rowsY.unshift(cu); }
-    for (t = 0; t < 40; t++) { if (rpb && rowsY.length >= rpb) break; var cd = rowsY[rowsY.length - 1] + P; if (!rowIsAnswer(cd)) break; rowsY.push(cd); }
-    /* the known layout overrides: a row the chain could not see is still a row of the sheet */
-    while (rpb && rowsY.length < rpb) rowsY.push(rowsY[rowsY.length - 1] + P);
-    while (rpb && rowsY.length > rpb) rowsY.pop();
-    info.rows = rowsY.length;
-    info.rowsY = rowsY.map(function (vv) { return Math.round(vv); });
+    var inkSm = new Float32Array(H);
+    for (y = 0; y < H; y++) {
+      var sA = 0, nA = 0;
+      for (var qA = Math.max(0, y - 2); qA <= Math.min(H - 1, y + 2); qA++) { sA += rowInk[qA]; nA++; }
+      inkSm[y] = sA / nA;
+    }
+    var inkMax = 0;
+    for (y = 0; y < H; y++) if (inkSm[y] > inkMax) inkMax = inkSm[y];
+    /* how evenly row y's ink sits across the blocks: a printed row carries a ring in every option
+       column of every block, while a digit strip, a ruled line or a stamp does not */
+    var rowBal = function (y0b) {
+      var mn = Infinity, sm = 0;
+      for (var bz = 0; bz < NB; bz++) {
+        var vz = 0, bi2 = inkByB[bz];
+        for (var yz = Math.max(0, y0b - 1); yz <= Math.min(H - 1, y0b + 1); yz++) vz += bi2[yz];
+        sm += vz; if (vz < mn) mn = vz;
+      }
+      return sm > 0 ? mn / (sm / NB) : 0;
+    };
+    var crest = [];
+    if (inkMax >= 2) {
+      for (y = 1; y < H - 1; y++) if (inkSm[y] >= inkSm[y - 1] && inkSm[y] > inkSm[y + 1] && inkSm[y] > 0.2 * inkMax) crest.push(y);
+      var crestM = [];
+      for (i = 0; i < crest.length; i++) {
+        if (crestM.length && crest[i] - crestM[crestM.length - 1] < 0.5 * P) {
+          if (inkSm[crest[i]] > inkSm[crestM[crestM.length - 1]]) crestM[crestM.length - 1] = crest[i];
+        } else crestM.push(crest[i]);
+      }
+      crest = crestM;
+    }
+    info.crest = crest.map(function (vv) { return vv + ':' + Math.round(inkSm[vv]) + ':' + Math.round(100 * rowBal(vv)); });
+
+    /* each block is read on its own lattice: a hand-held page curves, so block 5's rows sit at
+       different image heights than block 1's, and one shared chain of crests can only fit one of
+       them. Within a single block the printed rings in its option columns make every row a crest,
+       and the best-scoring chain one pitch apart is that block's own rows */
+    var smB = [], rowsB = [], crB = [];
+    /* the vertical band the answer grid lives in: the shared chain found it (roll grid above,
+       declaration box below), so no block may look for rows outside it plus two pitches */
+    var bandLo = Math.max(1, Math.round(rowsY[0] - 2 * P));
+    var bandHi = Math.min(H - 2, Math.round(rowsY[rowsY.length - 1] + 2 * P));
+    for (i = 0; i < NB; i++) {
+      var sm5 = new Float32Array(H);
+      for (y = 0; y < H; y++) {
+        var sB2 = 0, nB2 = 0;
+        for (var qB = Math.max(0, y - 2); qB <= Math.min(H - 1, y + 2); qB++) { sB2 += inkByB[i][qB]; nB2++; }
+        sm5[y] = sB2 / nB2;
+      }
+      smB.push(sm5);
+      var mx5 = 0;
+      for (y = bandLo; y <= bandHi; y++) if (sm5[y] > mx5) mx5 = sm5[y];
+      var cr5 = [];
+      if (mx5 >= 2) {
+        for (y = bandLo; y <= bandHi; y++) if (sm5[y] >= sm5[y - 1] && sm5[y] > sm5[y + 1] && sm5[y] > 0.2 * mx5) cr5.push(y);
+        var crM = [];
+        for (j = 0; j < cr5.length; j++) {
+          if (crM.length && cr5[j] - crM[crM.length - 1] < 0.5 * P) {
+            if (sm5[cr5[j]] > sm5[crM[crM.length - 1]]) crM[crM.length - 1] = cr5[j];
+          } else crM.push(cr5[j]);
+        }
+        cr5 = crM;
+      }
+      if (dbg) {
+        info.cr5s = info.cr5s || [];
+        info.cr5s[i] = 'mx' + Math.round(mx5) + ' ' + cr5.map(function (vv) { return vv + ':' + Math.round(sm5[vv]); }).join(' ');
+        if (i < 2) {
+          var tp = [];
+          for (var yT = bandLo; yT <= bandLo + 200; yT += 3) tp.push(yT + ':' + Math.round(sm5[yT]));
+          info.topB = info.topB || [];
+          info.topB[i] = tp.join(' ');
+        }
+      }
+      var rowsS = [], nC5 = cr5.length;
+      if (mx5 >= 2 && nC5 >= 5) {
+        var dpS5 = new Float64Array(nC5), dpP5 = new Int32Array(nC5), dpK5 = new Int32Array(nC5);
+        var bestI5 = -1, bestS5 = -1;
+        for (var ib2 = 0; ib2 < nC5; ib2++) {
+          var vI = sm5[cr5[ib2]];
+          dpS5[ib2] = vI;
+          for (var jb2 = 0; jb2 < ib2; jb2++) {
+            var gp5 = cr5[ib2] - cr5[jb2];
+            if (gp5 < 0.62 * P || gp5 > 2.4 * P) continue;
+            var kk5 = Math.max(1, Math.min(2, Math.round(gp5 / P)));
+            var pen5 = (Math.abs(gp5 - kk5 * P) / P + 0.12 * (kk5 - 1)) * 0.6 * mx5;
+            var sc5 = dpS5[jb2] + vI - pen5;
+            if (sc5 > dpS5[ib2]) { dpS5[ib2] = sc5; dpP5[ib2] = jb2 + 1; dpK5[ib2] = kk5; }
+          }
+          if (dpS5[ib2] > bestS5) { bestS5 = dpS5[ib2]; bestI5 = ib2; }
+        }
+        if (bestI5 >= 0) {
+          var path = [], ks = [], ci = bestI5;
+          while (ci >= 0) { path.push(cr5[ci]); ks.push(dpK5[ci]); ci = dpP5[ci] - 1; }
+          path.reverse(); ks.reverse();
+          rowsS = [path[0]];
+          for (var u = 1; u < path.length; u++) {
+            var ku = ks[u] || 1, gapU = path[u] - path[u - 1];
+            for (var kk2 = 1; kk2 < ku; kk2++) rowsS.push(path[u - 1] + gapU * kk2 / ku);
+            rowsS.push(path[u]);
+          }
+          /* a ruled line just above the first row or below the last carries ink in every column —
+             no ring, no gap — so its coverage across the block's whole width gives it away, and
+             the chain ends drop whatever is not a row of bubbles */
+          var blk = slotAll[i];
+          var rx0 = Math.max(0, Math.round(blk.A - 0.55 * blk.p));
+          var rx1 = Math.min(w - 1, Math.round(blk.A + (optCount - 1) * blk.p + 0.55 * blk.p));
+          var ruleAt = function (yy8) {
+            var cov = 0, tot = 0;
+            for (var xr = rx0; xr <= rx1; xr++) {
+              tot++;
+              for (var yr = Math.max(0, yy8 - 1); yr <= Math.min(H - 1, yy8 + 1); yr++) if (sM[yr * w + xr]) { cov++; break; }
+            }
+            return tot ? cov / tot : 0;
+          };
+          var inksS = rowsS.map(function (vv) { return sm5[Math.round(vv)]; });
+          var thrS = 0.5 * percentile(inksS, 0.6);
+          var endGood = function (idx3) {
+            var v3 = Math.round(rowsS[idx3]);
+            return sm5[v3] >= thrS && ruleAt(v3) < 0.8;
+          };
+          if (dbg) {
+            var egRow = function (py) {
+              var vy = Math.round(py);
+              return vy + ':' + Math.round(sm5[vy]) + ':' + Math.round(100 * ruleAt(vy)) + ':' + (sm5[vy] >= thrS ? 1 : 0);
+            };
+            var egA = [], egB = [];
+            for (var g1 = 0; g1 < Math.min(4, rowsS.length); g1++) egA.push(egRow(rowsS[g1]));
+            for (var g2 = Math.max(0, rowsS.length - 4); g2 < rowsS.length; g2++) egB.push(egRow(rowsS[g2]));
+            info.rawBall = info.rawBall || []; info.rawBall[i] = Math.round(rowsS[0]) + '..' + Math.round(rowsS[rowsS.length - 1]) + 'x' + rowsS.length;
+            info.egTop = info.egTop || []; info.egTop[i] = 'thr' + Math.round(thrS) + ' ' + egA.join(' ');
+            info.egBot = info.egBot || []; info.egBot[i] = egB.join(' ');
+          }
+          var lenPre = rowsS.length;
+          while (rowsS.length > 5 && !endGood(0)) rowsS.shift();
+          var lenMid = rowsS.length;
+          while (rowsS.length > 5 && !endGood(rowsS.length - 1)) rowsS.pop();
+          if (dbg) { info.egTrim = info.egTrim || []; info.egTrim[i] = lenPre + '>' + lenMid + '>' + rowsS.length; }
+        }
+      }
+      rowsB.push(rowsS);
+      crB.push(cr5.slice(0, 45).join(' '));
+    }
+    info.R4 = rowsB.map(function (a) { return a.length; }).join(',');
+    info.R4c = crB.join(' | ');
+    info.band = bandLo + '..' + bandHi;
+
+    /* the paper fixes the count: every block carries the same number of rows, so the blocks vote.
+       A chain's raw length is not a vote though — strays above or below the grid pad it. What is
+       voted is each block's longest run of consecutive solid rows: ring ink in most columns, no
+       rule line across the block, even spacing. Strays break the run, so they never count. The
+       page's hint (qCount/NB) settles a row or two of doubt when it agrees; when it disagrees
+       with the ink it is only a guess — the form ships 50 questions until a sheet corrects it —
+       and the ink wins */
+    var cnts = [], runVote = [];
+    for (i = 0; i < NB; i++) if (rowsB[i].length >= 5) cnts.push(rowsB[i].length);
+    for (i = 0; i < NB; i++) {
+      var rwV = rowsB[i];
+      if (rwV.length < 5) continue;
+      var smV = smB[i], blkV = slotAll[i];
+      var rxv0 = Math.max(0, Math.round(blkV.A - 0.55 * blkV.p));
+      var rxv1 = Math.min(w - 1, Math.round(blkV.A + (optCount - 1) * blkV.p + 0.55 * blkV.p));
+      var ruleAtV = function (yy9) {
+        var cov9 = 0, tot9 = 0;
+        for (var xr9 = rxv0; xr9 <= rxv1; xr9++) {
+          tot9++;
+          for (var yr9 = Math.max(0, yy9 - 1); yr9 <= Math.min(H - 1, yy9 + 1); yr9++) if (sM[yr9 * w + xr9]) { cov9++; break; }
+        }
+        return tot9 ? cov9 / tot9 : 0;
+      };
+      var runV = 0, bestV = 0, prevV = -1e9;
+      for (var jv = 0; jv < rwV.length; jv++) {
+        var vyv = Math.round(rwV[jv]);
+        var vvv = (vyv >= 0 && vyv < H) ? smV[vyv] : 0;
+        if (vvv < 6 || ruleAtV(vyv) >= 0.45) { runV = 0; prevV = vyv; continue; }
+        var gapV = rwV[jv] - prevV;
+        if (runV && (gapV < 0.75 * P || gapV > 1.35 * P)) runV = 0;
+        runV++;
+        if (runV > bestV) bestV = runV;
+        prevV = vyv;
+      }
+      if (bestV >= 5) runVote.push(bestV);
+      if (dbg) {
+        var hv = [];
+        for (var q6 = 0; q6 < Math.min(6, rwV.length); q6++) {
+          var yh6 = Math.round(rwV[q6]);
+          var vh6 = (yh6 >= 0 && yh6 < H) ? smV[yh6] : 0;
+          hv.push(yh6 + ':' + Math.round(vh6) + ':' + Math.round(100 * ruleAtV(yh6)));
+        }
+        info.headV = info.headV || [];
+        info.headV[i] = hv.join(' ');
+      }
+    }
+    var runMed = runVote.length ? Math.round(median(runVote)) : 0;
+    var NN2 = cnts.length ? Math.round(median(cnts)) : 0;
+    var finB = [], nRows = 0;
+    if (NN2 >= 5 && cnts.length >= Math.ceil(NB / 2)) {
+      if (rpb >= 5 && runMed >= 5 && Math.abs(runMed - rpb) <= 3) nRows = rpb;
+      else if (runMed >= 8) nRows = runMed;
+      else nRows = (rpb >= 5 && Math.abs(NN2 - rpb) <= 3) ? rpb : NN2;
+      for (i = 0; i < NB; i++) {
+        var sm6 = smB[i], rw = rowsB[i].slice();
+        if (rw.length < 5) rw = rowsY.slice();
+        var blk9 = slotAll[i];
+        var rx0b = Math.max(0, Math.round(blk9.A - 0.55 * blk9.p));
+        var rx1b = Math.min(w - 1, Math.round(blk9.A + (optCount - 1) * blk9.p + 0.55 * blk9.p));
+        var ruleAtB = function (yy9) {
+          var cov9 = 0, tot9 = 0;
+          for (var xr9 = rx0b; xr9 <= rx1b; xr9++) {
+            tot9++;
+            for (var yr9 = Math.max(0, yy9 - 1); yr9 <= Math.min(H - 1, yy9 + 1); yr9++) if (sM[yr9 * w + xr9]) { cov9++; break; }
+          }
+          return tot9 ? cov9 / tot9 : 0;
+        };
+        /* a short chain can be seated on a stray: a ruled line or a faded smudge above the grid
+           can start the chain a row or two early, and padding below would carry that offset into
+           every question of the block. Re-seat such a head on the first row carrying solid ring
+           ink — but only when a row above it is ruled or clearly weaker, so a true (if faint)
+           first row is never thrown away. Chains long enough for the window vote are left to it. */
+        if (rw.length < nRows) {
+          var q7 = -1;
+          for (var j7 = 0; j7 + 13 <= rw.length; j7++) {
+            var y7 = Math.round(rw[j7]);
+            var v7 = (y7 >= 0 && y7 < H) ? sm6[y7] : 0;
+            if (v7 >= 10 && ruleAtB(y7) < 0.45) { q7 = j7; break; }
+          }
+          if (q7 > 0) {
+            var vq7 = sm6[Math.round(rw[q7])] || 1, ruled7 = false, weak7 = false;
+            for (var j8 = 0; j8 < q7; j8++) {
+              var y8 = Math.round(rw[j8]), v8 = (y8 >= 0 && y8 < H) ? sm6[y8] : 0;
+              if (ruleAtB(y8) >= 0.45) ruled7 = true;
+              if (v8 < 0.6 * vq7) weak7 = true;
+            }
+            if (ruled7 || weak7) rw = rw.slice(q7);
+          }
+        }
+        var snapB = function (py) {
+          var lo6 = Math.round(py + 0.62 * P), hi6 = Math.round(py + 1.45 * P), bY6 = -1, bV6 = -1;
+          for (var yy6 = lo6; yy6 <= hi6; yy6++) {
+            if (yy6 < 1 || yy6 >= H - 1) continue;
+            var wv6 = sm6[yy6] * (1 - 0.55 * Math.abs(yy6 - (py + P)) / P);
+            if (wv6 > bV6) { bV6 = wv6; bY6 = yy6; }
+          }
+          return bY6;
+        };
+        var snapU = function (py) {
+          var lo8 = Math.round(py - 1.45 * P), hi8 = Math.round(py - 0.62 * P), bY8 = -1, bV8 = -1;
+          for (var yy8 = lo8; yy8 <= hi8; yy8++) {
+            if (yy8 < 1 || yy8 >= H - 1) continue;
+            var wv8 = sm6[yy8] * (1 - 0.55 * Math.abs(yy8 - (py - P)) / P);
+            if (wv8 > bV8) { bV8 = wv8; bY8 = yy8; }
+          }
+          return bY8;
+        };
+        var guard = 0, acts = '';
+        while (rw.length < nRows && guard++ < 90) {
+          /* a chain can be short at the TOP too, and padding only at the bottom would leave
+             every question number of the block one row off; whichever end sits further from
+             the shared chain is extended first */
+          var headGap = rw[0] - rowsY[0], tailGap = rowsY[rowsY.length - 1] - rw[rw.length - 1];
+          if (rw.length >= 5 && headGap > tailGap + 0.55 * P) {
+            var ny8 = snapU(rw[0]);
+            if (ny8 < 0 || ny8 > rw[0] - 0.5 * P) break;
+            rw.unshift(ny8);
+            acts += 'u';
+            continue;
+          }
+          var ny6 = rw.length >= 5 ? snapB(rw[rw.length - 1]) : -1;
+          if (ny6 < 0) ny6 = rw[rw.length - 1] + P;
+          if (ny6 >= H - 1) break;
+          rw.push(ny6);
+          acts += 'd';
+        }
+        /* a chain can run past the grid at either end: printed text or rule lines below the
+           answer grid carry as much ink as a row of rings, and a stray ink peak above the grid
+           can pass the same tests. The paper's count tells how many rows the block really has,
+           so the window of that many rows which best looks like the grid wins — rows that lack
+           ring ink, rows whose ink covers the block's whole width (text, ruled lines) and gaps
+           that cramp or skip rows are voted down */
+        if (rw.length > nRows) {
+          var maxS9 = rw.length - nRows, bestW9 = 0, bestGood9 = -1, bestBad9 = 1e9, bestPen9 = 1e18;
+          for (var s9 = 0; s9 <= maxS9; s9++) {
+            var good9 = 0, bad9 = 0, pen9 = 0;
+            for (var w9 = 0; w9 < nRows; w9++) {
+              var vy9 = Math.round(rw[s9 + w9]);
+              var vs9 = (vy9 >= 0 && vy9 < H) ? sm6[vy9] : 0;
+              if (vs9 >= 6 && ruleAtB(vy9) < 0.45) good9++;
+              if (w9 > 0) {
+                var gp9 = rw[s9 + w9] - rw[s9 + w9 - 1];
+                pen9 += Math.abs(gp9 - P);
+                if (gp9 < 0.75 * P || gp9 > 1.35 * P) bad9++;
+              }
+            }
+            if (good9 > bestGood9 || (good9 === bestGood9 && (bad9 < bestBad9 || (bad9 === bestBad9 && pen9 < bestPen9)))) {
+              bestGood9 = good9; bestBad9 = bad9; bestPen9 = pen9; bestW9 = s9;
+            }
+          }
+          rw = rw.slice(bestW9, bestW9 + nRows);
+          acts += 'w' + bestW9;
+        }
+        if (dbg) { info.acts = info.acts || []; info.acts[i] = acts; }
+        finB.push(rw);
+      }
+    } else {
+      /* the per-block trains failed: fall back to the shared chain, padded or trimmed to the
+         count the page expects */
+      while (rpb && rowsY.length < rpb) rowsY.push(rowsY[rowsY.length - 1] + P);
+      while (rpb && rowsY.length > rpb) rowsY.pop();
+      nRows = rowsY.length;
+      for (i = 0; i < NB; i++) finB.push(rowsY);
+    }
+    if (dbg) info.vote = runVote.join(',') + ' med' + runMed + ' rpb' + rpb + ' NN2 ' + NN2 + ' nRows ' + nRows;
+    info.rows = nRows;
+    info.rowsB = finB.map(function (a) { return Math.round(a[0]) + '..' + Math.round(a[a.length - 1]) + 'x' + a.length; });
+    info.rowsBall = finB.map(function (a) { return a.map(function (vv) { return Math.round(vv); }); });
+    info.rowsY = info.rowsBall[0];
 
     /* the reading itself: a filled bubble is a solid disk of ink; an empty one is only a printed
        ring with an open middle, so a disk test separates the two by a wide margin */
@@ -1189,14 +1590,15 @@
     for (i = 0; i < NB; i++) {
       var sl2 = slotAll[i], rad = sl2 ? Math.max(4, 0.32 * sl2.p) : 0;
       var offs = sl2 ? diskOffsets(rad) : null;
-      for (var ri = 0; ri < rowsY.length; ri++) {
+      var rws = finB[i];
+      for (var ri = 0; ri < rws.length; ri++) {
         if (!sl2) { fr1.push(0); fr2.push(0); continue; }
         var best1 = 0, best2 = 0, o1 = -1, o2 = -1;
         for (k = 0; k < optCount; k++) {
           var f1 = 0, f2 = 0;
           for (var dxo = -0.3; dxo <= 0.301; dxo += 0.15) {
             for (var dyo = -0.15; dyo <= 0.151; dyo += 0.15) {
-              var cx4 = sl2.x[k] + dxo * sl2.p, cy4 = rowsY[ri] + dyo * sl2.p;
+              var cx4 = sl2.x[k] + dxo * sl2.p, cy4 = rws[ri] + dyo * sl2.p;
               var tv = diskFrac(sT, cx4, cy4, offs);
               if (tv > f1) f1 = tv;
               tv = diskFrac(sL, cx4, cy4, offs);
@@ -1209,12 +1611,12 @@
         fr1.push(Math.round(best1 * 100) / 100);
         fr2.push(Math.round(best2 * 100) / 100);
         var opt = best1 >= 0.4 ? o1 : (best2 >= 0.75 ? o2 : -1);
-        if (opt >= 0) answers.push({ no: i * rowsY.length + ri + 1, answer: String.fromCharCode(65 + opt) });
+        if (opt >= 0) answers.push({ no: i * nRows + ri + 1, answer: String.fromCharCode(65 + opt) });
       }
     }
     info.fracs = { f1: fr1, f2: fr2 };
     info.marks = answers.length;
-    return { answers: answers, _dbg: dbg ? info : undefined };
+    return { answers: answers, layout: { optCount: optCount, NB: NB, rows: nRows }, _dbg: dbg ? info : undefined };
   }
 
   /* 1-D clustering: sorted values merge into one cluster while each stays within gapAbs of the
@@ -1281,7 +1683,13 @@
       }
       if (bmp.close) bmp.close();
       if (opts.onProgress) opts.onProgress(1);
-      return lat.answers.length > found.answers.length ? lat.answers : found.answers;
+      if (lat.answers.length > found.answers.length) {
+        /* let the page sync itself to what the sheet really carries (options per question,
+           blocks, total questions) instead of the numbers the form was opened with */
+        if (lat.layout) lat.answers._layout = { optCount: lat.layout.optCount, NB: lat.layout.NB, qCount: lat.layout.NB * lat.layout.rows };
+        return lat.answers;
+      }
+      return found.answers;
     });
   }
 
