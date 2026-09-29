@@ -374,7 +374,6 @@
     $('btnMatch').disabled = true;
     state.t0 = Date.now();
     state.hindiBroken = false;
-    state.hindiGarbledOnly = false;
     /* every fresh run may ask the AI again — the guard only stops handleTexts calling itself */
     state.aiDone = false;
     tick(); tickTimer();
@@ -428,17 +427,12 @@
 
     /* Many govt. PDFs carry a hand-built text layer that scrambles Devanagari ("सूची" -> "सचू ी").
        Page OCR cannot repair that (it garbles Hindi itself), so the AI is asked for the file —
-       its reading is adopted only when it is at least as complete (see readNext). */
+       its reading is adopted only when it is at least as complete (see readNext).
+       Until then the damaged Hindi is shown exactly as the file stores it: a partly-scrambled Hindi
+       line is far more useful than none, and the Hindi copy also serves as a matching signature
+       (see signature() in matcher.js). Only the AI pass below may replace it with a clean reading. */
     state.hindiBroken = (M.hindiQuality(qText) !== null && M.hindiQuality(qText) > 0.06) ||
                          (M.hindiQuality(kText) !== null && M.hindiQuality(kText) > 0.06);
-    /* Bilingual paper whose Hindi layer is scrambled: the English half is intact, so matching uses
-       it and the unreadable Hindi copy is dropped instead of being shown as broken text. */
-    state.hindiGarbledOnly = state.hindiBroken && M.latinShare(qText) >= 0.3;
-    if (state.hindiGarbledOnly) {
-      [state.paper, state.key].forEach(function (list) {
-        list.forEach(function (q) { q.alt = ''; q.altOptions = null; });
-      });
-    }
 
     if (!state.aiDone && window.ExamAI && window.ExamAI.available()) { aiReread(); return; }
     done(qText, kText);
@@ -752,15 +746,11 @@
     }
     /* Browser page-OCR is off in this flow (it cannot read Hindi). A scan is read by the AI, so when
        Hindi still looks broken the message must point at the AI, never at a retry button. */
-    if (state.hindiGarbledOnly && !state.aiUsed) {
-      msg += '<br><br>⚠️ इस PDF के अंदर हिंदी अक्षर उल्टे क्रम में saved हैं ("सूची" की जगह "सचू ी") —'
-        + ' यह गलती website की नहीं, PDF file की है। हर प्रश्न का <b>English हिस्सा बिल्कुल साफ़</b> है,'
-        + ' इसलिए matching उसी से हुई है और बिगड़ी हुई हिंदी छिपा दी गई है।'
-        + ' साफ़ हिंदी चाहिए तो इस PDF की pages की photo खींचकर (या स्क्रीनशॉट बनाकर) upload करें —'
-        + ' AI (Gemini / Groq) उन्हें ठीक पढ़ता है।';
-    } else if (state.hindiBroken && !state.aiUsed && !state.aiError) {
-      msg += '<br><br>⚠️ इस scan की हिंदी साफ़ नहीं पढ़ी जा सकी। साफ़ हिंदी के लिए page की नई photo खींचकर upload करें'
-        + ' — photo AI (Gemini / Groq) से पढ़ी जाती है।';
+    if (state.hindiBroken && !state.aiUsed) {
+      msg += '<br><br>⚠️ इस upload की हिंदी में कुछ अक्षर उल्टे क्रम में saved हैं ("सूची" की जगह "सचू ी") —'
+        + ' यह गलती website की नहीं, file की है। हिंदी ठीक उसी रूप में दिखाई गई है जैसी file में saved है'
+        + ' (English हिस्सा हर जगह साफ़ है)। एकदम साफ़ हिंदी के लिए इस file की pages की photo खींचकर'
+        + ' (या स्क्रीनशॉट बनाकर) upload करें — AI (Gemini / Groq) उन्हें ठीक पढ़ता है।';
     }
     /* The AI pass only ever runs on a file the browser could not finish, so say plainly what it did —
        including when it read more than the browser and when it could not read the file at all. */
