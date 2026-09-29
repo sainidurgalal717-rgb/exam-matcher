@@ -1,6 +1,7 @@
 /* Tiny origin-checked proxy for exam-matcher's AI calls.
-   The provider keys live here as environment variables (GEMINI_KEY, GROQ_KEY) and never ship in the
-   website, so nothing public can leak them. The site on the allowed origins is the only caller.
+   The provider keys live here as environment variables (GEMINI_KEY or GEMINI_API_KEY,
+   GROQ_KEY or GROQ_API_KEY) and never ship in the website, so nothing public can leak them.
+   The site on the allowed origins is the only caller.
 
    Routes:  /gemini/*  -> https://generativelanguage.googleapis.com/*
             /groq/*    -> https://api.groq.com/openai/*
@@ -11,8 +12,8 @@ const http = require('http');
 const https = require('https');
 
 const PORT = process.env.PORT || 10000;
-const GEMINI_KEY = process.env.GEMINI_KEY || '';
-const GROQ_KEY = process.env.GROQ_KEY || '';
+const GEMINI_KEY = process.env.GEMINI_KEY || process.env.GEMINI_API_KEY || '';
+const GROQ_KEY = process.env.GROQ_KEY || process.env.GROQ_API_KEY || '';
 
 const ORIGINS = new Set([
   'https://exam-matcher.onrender.com',
