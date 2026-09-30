@@ -76,6 +76,38 @@ function cacheStore(k, entry) {
   cache.set(k, entry);
 }
 
+/* The key is the PAGE PICTURE plus the instruction, on purpose:
+   - which model answers is not part of it, because the client moves between models as keys get rate
+     limited, and the same page sent to a different model would otherwise never match the first read;
+   - the answer to "transcribe this page" is the same for every student who uploads that page, which
+     is exactly the case worth making fast.
+   A request whose body carries no picture (a ping, a model list) is keyed on the whole request. */
+function readKey(route, rest, body) {
+  var imgs = [], texts = [];
+  try {
+    var j = JSON.parse(body.toString('utf8'));
+    var parts = [];
+    var c0 = j.contents && j.contents[0];
+    if (c0 && c0.parts) parts = c0.parts;
+    var m0 = j.messages && j.messages[0];
+    if (!parts.length && m0) parts = typeof m0.content === 'string' ? [{ text: m0.content }] : (m0.content || []);
+    parts.forEach(function (p) {
+      if (!p) return;
+      var img = p.inline_data || p.inlineData;
+      if (img && img.data) imgs.push(String(img.data));
+      else if (p.image_url && p.image_url.url) imgs.push(String(p.image_url.url));
+      else if (p.text) texts.push(String(p.text));
+    });
+  } catch (e) { /* not the JSON shape we know — fall through to the whole-body key */ }
+  var h = crypto.createHash('sha256');
+  if (imgs.length) {
+    h.update('page|' + route + '|' + texts.join('\n') + '|' + imgs.join('\n'));
+  } else {
+    h.update('req|' + route + ' ' + rest + '|').update(body);
+  }
+  return h.digest('base64');
+}
+
 function corsHeaders(origin) {
   return {
     'access-control-allow-origin': origin,
@@ -164,7 +196,7 @@ const server = http.createServer(function (req, res) {
     const body = Buffer.concat(chunks);
     const gzOK = /gzip/.test(req.headers['accept-encoding'] || '');
     const ck = (req.method === 'POST' && body.length)
-      ? route + ' ' + rest + ' ' + crypto.createHash('sha256').update(body).digest('base64') : '';
+      ? readKey(route, rest, body) : '';
 
     if (ck) {
       const c = cache.get(ck);
