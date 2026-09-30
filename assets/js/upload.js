@@ -445,6 +445,7 @@
      never touch this. The AI reading replaces the browser one only when it is at least as complete
      as what the browser read — so it can never make a result worse. */
   var AI_BUDGET_MS = 10 * 60 * 1000;
+  var AI_HARD_STOP_MS = 16 * 60 * 1000;
 
   function aiFile(which) {
     return which === 'q' ? state.qFile : which === 'k' ? state.kFile : state.k2File;
@@ -509,12 +510,12 @@
     Promise.all(want.map(aiPagesOf)).then(function () {
       var targets = want.filter(aiWeak);
       if (!targets.length) { done(state.qText, state.kText); return; }
-      var deadline = Date.now() + AI_BUDGET_MS;
+      var hardStop = Date.now() + AI_HARD_STOP_MS;
       state.aiNames = targets.map(aiLabel);
       status('info', 'AI से दोबारा पढ़ा जा रहा है…',
         'इन files का ब्राउज़र वाला text अधूरा रहा, इसलिए pages AI (Gemini / Groq) को भेजी जा रही हैं: <b>'
         + esc(targets.map(aiLabel).join(', ')) + '</b>');
-      return readNext(0, targets, deadline);
+      return readNext(0, targets, hardStop);
     }).then(function () {
       try { handleTexts(state.qText, state.kText, state.k2Text, false); }
       catch (err) { fail(err); }
@@ -525,9 +526,12 @@
     });
   }
 
-  function readNext(i, targets, deadline) {
+  /* One fresh reading window per file, so a 45-page Question Paper cannot eat the time the
+     Answer Key still needs; AI_HARD_STOP_MS keeps the whole pass inside one wait. */
+  function readNext(i, targets, hardStop) {
     if (i >= targets.length) return Promise.resolve();
     var which = targets[i], nm = aiLabel(which);
+    var deadline = Math.min(Date.now() + AI_BUDGET_MS, hardStop);
     state.aiTried[which] = true;
     progress(0.74, 'AI ' + nm + ' पढ़ रहा है…');
     return window.ExamAI.readFile(aiFile(which), {
@@ -551,7 +555,7 @@
       if (which === 'q') state.qText = text;
       else if (which === 'k') state.kText = text;
       else state.k2Text = text;
-    }).then(function () { return readNext(i + 1, targets, deadline); });
+    }).then(function () { return readNext(i + 1, targets, hardStop); });
   }
 
   function done(qText, kText) {

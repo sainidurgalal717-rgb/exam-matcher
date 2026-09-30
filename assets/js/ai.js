@@ -14,7 +14,9 @@
   var PROXY = global.EXAMAI_PROXY || 'https://exam-matcher-ai.onrender.com';
   var GEMINI_HOST = PROXY + '/gemini/v1beta';
   var GROQ_HOST = PROXY + '/groq/v1';
-  var CONC = 3;            /* pages in flight at once */
+  var CONC = global.EXAMAI_CONC || 5;   /* pages in flight at once — the proxy rotates a pool of
+                                           keys, so pages can go side by side without one key
+                                           hitting its limit */
   var PAGE_MS = 75000;     /* one page may take this long before it counts as failed */
   var MAX_PAGES = 60;      /* a single paper is never longer than this */
 
@@ -196,13 +198,6 @@
         if (!this.noThink) cfg.thinkingConfig = { thinkingBudget: 0 };
         return geminiPost(model, cfg, [{ text: 'Reply with exactly: OK' }], this)
           .then(function (t) { return /ok/i.test(t); });
-      },
-      fatal: function (e) {
-        if (e.skip) return false;
-        var s = e.status;
-        if (s === 429) return false;   /* rate limit — waited out, not a dead model */
-        if (s >= 400) return true;     /* 400/401/403/404/5xx: this model cannot serve this request */
-        return /api key|permission|not found|not supported|quota|billing/i.test(e.message || '');
       }
     },
     groq: {
@@ -242,13 +237,6 @@
         }).then(function (j) {
           return /ok/i.test((j.choices && j.choices[0] && j.choices[0].message.content) || '');
         });
-      },
-      fatal: function (e) {
-        if (e.skip) return false;
-        var s = e.status;
-        if (s === 429) return false;   /* rate limit — waited out, not a dead model */
-        if (s >= 400) return true;     /* 400 (wrong request shape) or 401/403/404/5xx */
-        return /api key|invalid|decommission|not exist|permission|quota|billing/i.test(e.message || '');
       }
     }
   };
@@ -288,6 +276,10 @@
 
   /* ---------- provider chain ---------- */
 
+  /* Gemini first, Groq as the backup — measured both ways on the same 45-page scan:
+     Gemini first read it in 298 s with 1 page lost, Groq first in 494 s with 10 pages lost, because
+     Groq's free tier collapses after ~18 pictures even though a single Groq page answers in 2-4 s
+     against Gemini's 5-26 s. The fast per-page answer is not the fast whole paper. */
   var ORDER = ['gemini', 'groq'];
   var ready = {};      /* id -> ranked model list, false once it proved unusable, undefined = not asked yet */
   var current = null;  /* the provider that is working, reused for every later page */
@@ -325,15 +317,38 @@
     return next();
   }
 
-  /* move the provider on to its next candidate model, or drop it once the list is empty */
-  function advance(c, drop) {
-    var rest = drop ? [] : (ready[c.id] || []).slice(1);
-    ready[c.id] = rest.length ? rest : false;
-    if (!ready[c.id]) current = null;
+  /* Put the model that just failed at the BACK of the list instead of deleting it: the next page
+     gets a different model, and a model that is only occasionally unable is still there later.
+     Deleting (advance) is what used to happen on every odd page — with several pages in flight a
+     45-page scan emptied the candidate list that way, and the run then reported "no provider works"
+     while every provider was fine. */
+  function rotate(c) {
+    var lst = ready[c.id];
+    if (!lst || lst.length < 2) return;
+    var k = lst.indexOf(c.model);
+    if (k >= 0) lst.push(lst.splice(k, 1)[0]);
+  }
+
+  /* take one model out of the list for good — used only when the model itself is unusable */
+  function retire(c) {
+    var lst = ready[c.id];
+    if (!lst) return;
+    var k = lst.indexOf(c.model);
+    if (k >= 0) lst.splice(k, 1);
+    if (!lst.length) { ready[c.id] = false; current = null; }
   }
 
   /* One page. A rate-limited provider is waited out before it is given up on — a free Gemini or Groq
      key allows only a handful of pages per minute, and a 45-page scan will meet that limit. */
+  var ATTEMPTS = 5;    /* models one page walks through before it counts as failed */
+  var strikes = {};    /* model -> recent failures; the third one retires that model */
+
+  function punished(c, e) {
+    if (e && e.status === 429 && /limit:\s*0\b/.test(e.message || '')) { retire(c); return; }
+    strikes[c.model] = (strikes[c.model] || 0) + 1;
+    if (strikes[c.model] >= 3) retire(c); else rotate(c);
+  }
+
   function readPage(dataUrl, tries) {
     tries = tries || 0;
     return pick().then(function (c) {
@@ -343,24 +358,23 @@
            models, every later page goes straight to the one that answered */
         var lst = ready[c.id], k = lst ? lst.indexOf(c.model) : -1;
         if (k > 0) { lst.splice(k, 1); lst.unshift(c.model); }
+        strikes[c.model] = 0;
         return t;
       }, function (e) {
-        if (e && e.status === 429) {
-          /* a model the free key can never use ("limit: 0") is skipped like an overloaded one */
-          if (/limit:\s*0\b/.test(e.message || '')) { advance(c, false); return readPage(dataUrl, tries); }
-          if (tries < 3) return sleep(4000 * (tries + 1)).then(function () { return readPage(dataUrl, tries + 1); });
-          advance(c, false);
-          return readPage(dataUrl, 0);
+        if (tries >= ATTEMPTS) throw e;
+        if (e && e.status === 429 && tries < 2 && !/limit:\s*0\b/.test(e.message || '')) {
+          /* a rate limit is usually a full minute of the shared key pool, not a dead model:
+             wait it out on this one before looking elsewhere */
+          return sleep(4000 * (tries + 1)).then(function () { return readPage(dataUrl, tries + 1); });
         }
-        if (c.p.fatal(e)) {
-          /* a model that is overloaded (503), retired (404) or rejects this request (400) is not a
-             dead provider — move to its next candidate, and drop the provider only on an auth/key
-             error or once the candidates run out. */
-          var auth = e.status === 401 || e.status === 403 || /api key|permission/i.test(e.message || '');
-          advance(c, auth);
-          return readPage(dataUrl, tries);
+        var auth = e && (e.status === 401 || e.status === 403 || /api key|permission/i.test(e.message || ''));
+        if (auth) {
+          /* the provider's keys are refused — no point handing the page to its next model */
+          ready[c.id] = false;
+          current = null;
+          return readPage(dataUrl, tries + 1);
         }
-        if (tries >= 1) throw e;
+        punished(c, e);
         return readPage(dataUrl, tries + 1);
       });
     });
